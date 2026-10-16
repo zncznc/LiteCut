@@ -1,0 +1,159 @@
+/* LiteCut 轻剪 —— 深色剪辑台风格 */
+:root {
+  --bg: #1b1b1c; --panel: #232325; --panel2: #2a2a2d; --line: #34343a;
+  --fg: #e8e8ea; --fg2: #9a9aa2; --accent: #3b82f6; --accent2: #22c55e;
+  --danger: #ef4444; --clip: #2f4f8f; --clipSel: #3b82f6; --audio: #2f6f52;
+  --text: #7a5aa8; --ruler: 26px; --trackh: 46px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+  font: 13px/1.5 "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+  overflow: hidden; user-select: none;
+}
+.spacer { flex: 1; }
+.tag {
+  font-size: 11px; color: var(--fg2); background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; margin-left: 6px;
+}
+h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; display: flex; align-items: center; }
+.hint { color: var(--fg2); font-size: 11px; margin: 8px 2px; }
+
+/* 顶栏 */
+.topbar {
+  display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 12px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { font-size: 14px; letter-spacing: .5px; display: flex; align-items: center; gap: 7px; }
+.brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.projname {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+  border-radius: 6px; padding: 5px 9px; width: 220px; font: inherit;
+}
+.projname:focus { outline: 1px solid var(--accent); }
+.btn {
+  background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 11px; cursor: pointer; font: inherit;
+}
+.btn:hover { background: #323238; }
+.btn.primary { background: #2b4a7d; border-color: #3a5c94; }
+.btn.accent { background: #1f5f3f; border-color: #2c7a52; }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+.btn.round { width: 34px; height: 34px; border-radius: 50%; font-size: 14px; }
+.btn:disabled { opacity: .45; cursor: default; }
+
+/* 主区 */
+.stage { display: grid; grid-template-columns: 250px 1fr 280px; gap: 8px; padding: 8px; height: calc(100vh - 46px - 300px); min-height: 300px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: hidden; display: flex; flex-direction: column; }
+
+/* 媒体库 */
+.medialist { overflow-y: auto; flex: 1; }
+.mitem {
+  display: flex; gap: 9px; align-items: center; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid transparent; cursor: grab;
+}
+.mitem:hover { background: var(--panel2); border-color: var(--line); }
+.mitem .ico { width: 34px; height: 26px; border-radius: 4px; background: #3a3a42; display: grid; place-items: center; font-size: 13px; }
+.mitem .nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mitem .mt { font-size: 10px; color: var(--fg2); }
+
+/* 预览 */
+.viewer { align-items: center; }
+.canvaswrap { flex: 1; width: 100%; display: grid; place-items: center; background: #111; border-radius: 6px; overflow: hidden; }
+#preview { max-width: 100%; max-height: 100%; background: #000; }
+.transport { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 8px; }
+.transport input[type=range] { flex: 1; accent-color: var(--accent); }
+.time { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--fg2); min-width: 190px; }
+.zoomlab { font-size: 11px; color: var(--fg2); display: flex; align-items: center; gap: 6px; }
+.zoomlab input { width: 110px; accent-color: var(--accent); }
+
+/* 属性 */
+.propbody { overflow-y: auto; flex: 1; }
+.row { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
+.row label { width: 74px; color: var(--fg2); font-size: 12px; }
+.row input[type=range] { flex: 1; accent-color: var(--accent); }
+.row input[type=text], .row input[type=number] {
+  flex: 1; background: var(--panel2); border: 1px solid var(--line);
+  color: var(--fg); border-radius: 5px; padding: 4px 7px; font: inherit;
+}
+.row .val { width: 46px; text-align: right; color: var(--fg2); font-size: 11px; }
+
+/* 时间轴 */
+.timeline { height: 300px; margin: 0 8px 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }
+.tltools { display: flex; align-items: center; gap: 6px; padding: 7px 9px; border-bottom: 1px solid var(--line); }
+.tlscroll { position: relative; flex: 1; overflow: auto; }
+.ruler { height: var(--ruler); position: sticky; top: 0; background: var(--panel2); border-bottom: 1px solid var(--line); z-index: 3; }
+.ruler .tick { position: absolute; top: 0; height: 100%; border-left: 1px solid var(--line); color: var(--fg2); font-size: 10px; padding-left: 4px; line-height: var(--ruler); }
+.tracks { position: relative; }
+.track { height: var(--trackh); border-bottom: 1px solid var(--line); position: relative; display: flex; }
+.track .thead {
+  width: 96px; flex: none; background: var(--panel2); border-right: 1px solid var(--line);
+  font-size: 11px; color: var(--fg2); display: flex; align-items: center; padding: 0 8px; gap: 4px;
+  position: sticky; left: 0; z-index: 2;
+}
+.track .tlane { position: relative; flex: 1; }
+.clip {
+  position: absolute; top: 5px; height: calc(var(--trackh) - 12px); border-radius: 5px;
+  background: var(--clip); border: 1px solid #4a6fb0; overflow: hidden; cursor: grab;
+  font-size: 11px; color: #dbe6ff; padding: 3px 7px; white-space: nowrap;
+}
+.clip.audio { background: var(--audio); border-color: #3f8f68; color: #d7f4e4; }
+.clip.text { background: var(--text); border-color: #9a7ac8; color: #efe4ff; }
+.clip.sel { border-color: var(--clipSel); box-shadow: 0 0 0 1px var(--clipSel), 0 0 10px rgba(59,130,246,.5); }
+.clip .hdl { position: absolute; top: 0; width: 7px; height: 100%; cursor: ew-resize; background: rgba(255,255,255,.12); }
+.clip .hdl.l { left: 0; } .clip .hdl.r { right: 0; }
+.clip .lbl { pointer-events: none; }
+.playhead { position: absolute; top: 0; width: 2px; background: var(--danger); z-index: 5; pointer-events: none; }
+.playhead::before { content: ""; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--danger); }
+
+/* 属性 / 字幕 双页签 */
+.tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.tab {
+  background: var(--panel2); color: var(--fg2); border: 1px solid var(--line);
+  border-radius: 6px 6px 0 0; padding: 5px 12px; cursor: pointer; font: inherit;
+}
+.tab.active { color: var(--fg); background: #323238; border-bottom-color: #323238; }
+.tabpane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.tabpane.hidden { display: none; }
+.panehd { font-size: 11px; color: var(--fg2); margin-bottom: 6px; }
+.subtools { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.subgen textarea {
+  width: 100%; height: 76px; resize: vertical; background: var(--panel2);
+  border: 1px solid var(--line); color: var(--fg); border-radius: 6px;
+  padding: 6px 8px; font: inherit; line-height: 1.45;
+}
+.subgen textarea:focus { outline: 1px solid var(--accent); }
+.subrow { display: flex; align-items: center; gap: 6px; margin: 7px 0; font-size: 11px; color: var(--fg2); }
+.subrow input[type=number] {
+  width: 52px; background: var(--panel2); border: 1px solid var(--line);
+  color: var(--fg); border-radius: 5px; padding: 3px 5px; font: inherit;
+}
+.subrow button { margin-left: auto; }
+.asrrow { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 8px; }
+.asrrow select {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+  border-radius: 5px; padding: 3px 5px; font: inherit; font-size: 11px; max-width: 132px;
+}
+.asrrow #asrProg { margin-left: auto; }
+.cuelist { overflow-y: auto; flex: 1; border-top: 1px solid var(--line); padding-top: 6px; }
+.cue { display: flex; gap: 6px; align-items: flex-start; padding: 4px 5px; border-radius: 5px; border: 1px solid transparent; }
+.cue:hover { background: var(--panel2); border-color: var(--line); }
+.cue.cur { border-color: var(--accent); background: #23324a; }
+.cue .idx { width: 20px; color: var(--fg2); font-size: 11px; text-align: right; }
+.cue .body { flex: 1; min-width: 0; }
+.cue .tm { font-size: 10px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.cue input {
+  width: 100%; background: transparent; border: none; color: var(--fg);
+  font: inherit; padding: 1px 0; border-bottom: 1px dotted transparent;
+}
+.cue input:focus { outline: none; border-bottom-color: var(--accent); }
+.cue .del { background: transparent; border: none; color: var(--fg2); cursor: pointer; font-size: 13px; padding: 0 2px; }
+.cue .del:hover { color: var(--danger); }
+
+/* 状态栏 */
+.status { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; background: var(--panel); border-top: 1px solid var(--line); font-size: 12px; color: var(--fg2); }
+.progresswrap { width: 220px; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+.progressbar { height: 100%; width: 0; background: var(--accent2); transition: width .12s linear; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #3d3d45; border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }

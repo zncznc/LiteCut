@@ -1,0 +1,19 @@
+# 依赖与本地产物
+node_modules/
+.npm-cache/
+npm-debug.log*
+*.log
+
+# whisper.cpp 二进制与模型（535MB，不入库；按 tools/whisper/README.md 自行获取）
+tools/whisper/Release/
+tools/whisper/models/
+
+# 导出/测试产物
+out.mp4
+*.srt.tmp
+*.part
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store

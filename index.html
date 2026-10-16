@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; media-src 'self' file:; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'" />
+  <title>LiteCut 轻剪</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span>LiteCut <b>轻剪</b></div>
+    <input id="projName" class="projname" value="未命名工程" spellcheck="false" />
+    <div class="spacer"></div>
+    <button id="btnImport" class="btn primary">导入媒体</button>
+    <button id="btnOpen" class="btn">打开工程</button>
+    <button id="btnSave" class="btn">保存工程</button>
+    <button id="btnExport" class="btn accent">导出视频</button>
+  </header>
+
+  <main class="stage">
+    <!-- 左：媒体库 -->
+    <aside class="panel media">
+      <h3>媒体库 <span id="mediaCount" class="tag">0</span></h3>
+      <div id="mediaList" class="medialist"></div>
+      <p class="hint">双击素材加入主轨；也可拖到时间轴任意轨道</p>
+    </aside>
+
+    <!-- 中：预览 -->
+    <section class="panel viewer">
+      <div class="canvaswrap">
+        <canvas id="preview" width="1920" height="1080"></canvas>
+      </div>
+      <div class="transport">
+        <button id="btnPlay" class="btn round" title="播放/暂停 (空格)">▶</button>
+        <span id="timeLabel" class="time">00:00:00.00 / 00:00:00.00</span>
+        <input id="seek" type="range" min="0" max="1000" value="0" />
+        <span class="spacer"></span>
+        <label class="zoomlab">缩放 <input id="zoom" type="range" min="20" max="400" value="120" /></label>
+      </div>
+    </section>
+
+    <!-- 右：属性 / 字幕 -->
+    <aside class="panel props">
+      <div class="tabs">
+        <button class="tab active" data-tab="prop">属性</button>
+        <button class="tab" data-tab="sub">字幕 <span id="cueCount" class="tag">0</span></button>
+      </div>
+
+      <div id="tabProp" class="tabpane">
+        <div class="panehd">选中：<span id="selTag" class="tag">未选中</span></div>
+        <div id="propBody" class="propbody">
+          <p class="hint">选中时间轴上的片段后可调参数</p>
+        </div>
+      </div>
+
+      <div id="tabSub" class="tabpane hidden">
+        <div class="subtools">
+          <button id="btnSubImport" class="btn small">导入 SRT/VTT</button>
+          <button id="btnSubExport" class="btn small">导出 SRT</button>
+          <button id="btnSubAdd" class="btn small">＋ 播放头处一条</button>
+        </div>
+        <div class="asrrow">
+          <span class="tag">语音识别</span>
+          <select id="subModel" title="whisper 模型"></select>
+          <select id="subLang" title="语言">
+            <option value="zh">中文</option>
+            <option value="auto">自动</option>
+            <option value="en">英文</option>
+          </select>
+          <button id="btnSubAsr" class="btn small accent">🎙 识别时间轴</button>
+          <span id="asrProg" class="tag">待命</span>
+        </div>
+        <div class="subgen">
+          <textarea id="subText" placeholder="台词每句一行粘进来；长文本会按标点自动断句。留空则用时间轴上已有的…"></textarea>
+          <div class="subrow">
+            <label>每行字数</label><input id="subMax" type="number" value="18" min="6" max="60" />
+            <label>总时长秒</label><input id="subTotal" type="number" value="0" min="0" step="1" title="0 = 按每字 0.28 秒朗读速度估算" />
+            <button id="btnSubGen" class="btn small primary">批量生成</button>
+          </div>
+        </div>
+        <div id="cueList" class="cuelist"><p class="hint">还没有字幕。导入 SRT/VTT、批量生成，或在播放头处加一条。</p></div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- 底：时间轴 -->
+  <section class="timeline">
+    <div class="tltools">
+      <button id="btnSplit" class="btn small" title="在播放头处分割 (S)">✂ 分割</button>
+      <button id="btnDelete" class="btn small" title="删除选中片段 (Del)">🗑 删除</button>
+      <button id="btnAddVideoTrack" class="btn small">+ 画中画轨</button>
+      <button id="btnAddTextTrack" class="btn small">+ 文字轨</button>
+      <button id="btnAddAudioTrack" class="btn small">+ 音频轨</button>
+      <span class="spacer"></span>
+      <button id="btnUndo" class="btn small" title="撤销 (Ctrl+Z)">↶ 撤销</button>
+      <button id="btnRedo" class="btn small" title="重做 (Ctrl+Y)">↷ 重做</button>
+      <span id="tlInfo" class="tag"></span>
+    </div>
+    <div id="tlScroll" class="tlscroll">
+      <div id="ruler" class="ruler"></div>
+      <div id="tracks" class="tracks"></div>
+      <div id="playhead" class="playhead"></div>
+    </div>
+  </section>
+
+  <!-- 状态栏 -->
+  <footer class="status">
+    <span id="status">就绪</span>
+    <span class="spacer"></span>
+    <span id="envInfo" class="tag"></span>
+    <div class="progresswrap"><div id="exportBar" class="progressbar"></div></div>
+  </footer>
+
+  <script src="subtitle.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
