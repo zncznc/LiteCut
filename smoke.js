@@ -161,6 +161,97 @@ app.whenReady().then(async () => {
     check("批量生成从播放头起（非 0）", sub.firstStart === sub.phBefore && sub.phBefore >= 0, "播放头 " + sub.phBefore + " → 首条 " + sub.firstStart);
     check("预览里字幕可见", sub.bright > 100, "字幕带亮像素 " + sub.bright);
 
+    // 4.6) 进阶能力：轨道开关 / 波纹删除 / 淡入淡出 / 同素材多实例 / 暂停拖播放头
+    const adv = await win.webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const US = 1e6;
+      const avg = (x, y, w, h) => {
+        const d = document.querySelector("#preview").getContext("2d").getImageData(x, y, w, h).data;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+        return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+      };
+      const clipOf = (id, mid, start, dur, scale) => ({ id, material_id: mid, visible: true, speed: 1, volume: 1,
+        target_timerange: { start, duration: dur }, source_timerange: { start: 0, duration: dur },
+        clip: { alpha: 1, scale: { x: scale, y: scale }, transform: { x: 0, y: 0 }, rotation: 0 } });
+      state.project.tracks = [
+        { id: "tk-v", type: "video", name: "主轨", segments: [clipOf("s1", "mv-red", 0, 2 * US, 1), clipOf("s2", "mv-blue", 2 * US, 2 * US, 1)] },
+        { id: "tk-a", type: "audio", name: "音频", segments: [
+          { id: "s3", material_id: "ma-tone", visible: true, speed: 1, volume: 0.5,
+            target_timerange: { start: 0, duration: 4 * US }, source_timerange: { start: 0, duration: 4 * US } }] },
+      ];
+      renderAll(); await wait(900);
+
+      // (a) 轨道头开关
+      const hasBtns = document.querySelectorAll('.track[data-tid="tk-v"] .thead .tbtn').length === 2;
+
+      // (b) 隐藏 → 预览变黑；显示 → 回红
+      setPlayhead(1 * US); await wait(700); drawFrame(1 * US);
+      const before = avg(700, 400, 500, 260);
+      document.querySelector('.track[data-tid="tk-v"] .thead .tbtn[data-act="vis"]').click();
+      await wait(150); drawFrame(1 * US);
+      const hidden = avg(700, 400, 500, 260);
+      document.querySelector('.track[data-tid="tk-v"] .thead .tbtn[data-act="vis"]').click();
+      await wait(150); setPlayhead(1 * US); await wait(700); drawFrame(1 * US);
+      const shown = avg(700, 400, 500, 260);
+      const visFlag = state.project.tracks[0].visible !== false;
+
+      // (c) 静音开关
+      const muteBtn = document.querySelector('.track[data-tid="tk-a"] .thead .tbtn[data-act="mut"]');
+      muteBtn.click(); await wait(80);
+      const muted = state.project.tracks[1].muted === true;
+      document.querySelector('.track[data-tid="tk-a"] .thead .tbtn[data-act="mut"]').click(); await wait(80);
+      const unmuted = state.project.tracks[1].muted !== true;
+
+      // (d) 暂停状态下拖播放头 → 元素 seek 跟随（老版本这里画面不跟）
+      setPlayhead(3 * US); await wait(900); drawFrame(3 * US);
+      const t3 = avg(700, 400, 500, 260);
+      const seeked = activeSegments(3 * US).map((a) => {
+        const el = els.get(a.seg.id);
+        return { id: a.seg.id, ct: el ? +el.currentTime.toFixed(2) : -1 };
+      });
+
+      // (e) 同一素材两个片段同时活动 → 各用各的元素
+      state.project.tracks[0].segments.push(clipOf("s5", "mv-blue", 2 * US, 2 * US, 0.4));
+      renderAll(); setPlayhead(3 * US); await wait(900); drawFrame(3 * US);
+      const act3 = activeSegments(3 * US);
+      const allOk = act3.every((a) => !!els.get(a.seg.id));
+      const distinct = new Set(act3.map((a) => els.get(a.seg.id))).size === act3.length;
+      state.project.tracks[0].segments = state.project.tracks[0].segments.filter((s) => s.id !== "s5");
+      renderAll(); await wait(200);
+
+      // (f) 波纹删除：删掉 s1(0-2s) 后，s2 应从 2s 左移到 0s
+      state.sel = { trackId: "tk-v", segId: "s1" };
+      rippleDeleteSel(); await wait(80);
+      const s2start = state.project.tracks[0].segments.find((s) => s.id === "s2").target_timerange.start / US;
+      const rippleStatus = document.querySelector("#status").textContent;
+
+      // (g) 淡入淡出：属性面板有输入项，预览 alpha 随时间 ramp
+      state.sel = { trackId: "tk-v", segId: "s2" };
+      renderProps();
+      const hasFadeInputs = !!document.querySelector('#propBody input[data-k="fadeIn"]')
+        && !!document.querySelector('#propBody input[data-k="fadeOut"]');
+      state.project.tracks[0].segments.find((s) => s.id === "s2").fade = { in: 1 * US, out: 0 };
+      setPlayhead(0.1 * US); await wait(800); drawFrame(0.1 * US);
+      const fadeLow = avg(700, 400, 500, 260);
+      setPlayhead(1.0 * US); await wait(800); drawFrame(1.0 * US);
+      const fadeFull = avg(700, 400, 500, 260);
+
+      return { hasBtns, before, hidden, shown, visFlag, muted, unmuted, t3, seeked, allOk, distinct,
+               s2start, rippleStatus, hasFadeInputs, fadeLow, fadeFull, elCount: els.size };
+    })()`);
+    check("轨道头有 显示/静音 两个开关", adv.hasBtns === true);
+    check("隐藏主轨后预览变黑", adv.hidden[0] + adv.hidden[1] + adv.hidden[2] < 60, JSON.stringify(adv.hidden));
+    check("恢复显示后预览回红", adv.shown[0] > adv.shown[2] + 40 && adv.visFlag === true, JSON.stringify(adv.shown));
+    check("静音开关可切换", adv.muted === true && adv.unmuted === true);
+    check("暂停拖播放头：画面跟到 3s（偏蓝）", adv.t3[2] > adv.t3[0] + 40, JSON.stringify(adv.t3));
+    check("seek 后元素时间码跟随源时间", adv.seeked.every((s) => s.ct >= 0) && adv.seeked.some((s) => s.ct > 0.5), JSON.stringify(adv.seeked));
+    check("同素材多实例各自独立元素", adv.allOk === true && adv.distinct === true, "元素数 " + adv.elCount);
+    check("波纹删除：后续片段左移到 0s", Math.abs(adv.s2start) < 0.001, "s2 start=" + adv.s2start);
+    check("波纹删除有状态提示", /波纹删除/.test(adv.rippleStatus), adv.rippleStatus);
+    check("属性面板有淡入/淡出输入", adv.hasFadeInputs === true);
+    check("预览淡入：0.1s 暗于 1.0s", adv.fadeLow[2] < adv.fadeFull[2] - 30, JSON.stringify([adv.fadeLow, adv.fadeFull]));
+
     // 5) 截图（顺带验证不是黑屏）
     const img = await win.webContents.capturePage();
     fs.writeFileSync(SHOT, img.toPNG());

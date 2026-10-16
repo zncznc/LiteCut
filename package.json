@@ -8,6 +8,7 @@
     "selftest": "node selftest.js",
     "subtest": "node subtest.js",
     "asrtest": "node asrtest.js",
+    "exptest": "node exptest.js",
     "smoke": "electron smoke.js"
   },
   "author": "",

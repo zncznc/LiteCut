@@ -87,10 +87,18 @@ h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; display: flex; align-it
 .tracks { position: relative; }
 .track { height: var(--trackh); border-bottom: 1px solid var(--line); position: relative; display: flex; }
 .track .thead {
-  width: 96px; flex: none; background: var(--panel2); border-right: 1px solid var(--line);
-  font-size: 11px; color: var(--fg2); display: flex; align-items: center; padding: 0 8px; gap: 4px;
+  width: 124px; flex: none; background: var(--panel2); border-right: 1px solid var(--line);
+  font-size: 11px; color: var(--fg2); display: flex; align-items: center; padding: 0 6px; gap: 3px;
   position: sticky; left: 0; z-index: 2;
 }
+.track .thead .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track .thead .tbtn {
+  background: transparent; border: 1px solid transparent; border-radius: 4px;
+  cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 3px; color: var(--fg2);
+}
+.track .thead .tbtn:hover { background: #3a3a42; border-color: var(--line); color: var(--fg); }
+.track.off .thead { opacity: .55; }
+.track.off .tlane { opacity: .4; }
 .track .tlane { position: relative; flex: 1; }
 .clip {
   position: absolute; top: 5px; height: calc(var(--trackh) - 12px); border-radius: 5px;

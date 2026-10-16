@@ -107,7 +107,7 @@ function renderMedia() {
     d.innerHTML = `<div class="ico">${ico}</div>
       <div style="min-width:0"><div class="nm">${escapeHtml(m.name)}</div>
       <div class="mt">${m.kind === "image" ? "图片" : usToStr(m.duration)}${m.width ? " · " + m.width + "×" + m.height : ""}</div></div>`;
-    d.ondblclick = () => addToTrackBest(m, 0);
+    d.ondblclick = () => addToTrackBest(m, null);   // 双击=追加到该轨道末尾
     d.ondragstart = (e) => e.dataTransfer.setData("text/lc-material", m.id);
     box.appendChild(d);
   }
@@ -125,7 +125,7 @@ function addToTrackBest(mat, startUs) {
   const dur = mat.duration || 5 * US;
   const seg = {
     id: nextId("s"), material_id: mat.id, visible: true, speed: 1, volume: 1,
-    target_timerange: T(startUs || freeStartOn(track, dur), dur),
+    target_timerange: T(startUs == null ? freeStartOn(track, dur) : Math.max(0, startUs), dur),
     source_timerange: T(0, dur),
     clip: { alpha: 1, scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0 },
   };
@@ -188,14 +188,28 @@ function renderTimeline() {
   box.innerHTML = "";
   for (const track of trackOrder()) {
     const row = document.createElement("div");
-    row.className = "track";
+    row.className = "track" + (trackHidden(track) ? " off" : track.muted === true ? " off" : "");
     row.dataset.tid = track.id;
     const th = document.createElement("div");
     th.className = "thead";
-    th.innerHTML = `${track.type === "video" ? "🎬" : track.type === "audio" ? "🎵" : "🅣"} ${escapeHtml(track.name || track.type)}`;
+    const vis = track.visible !== false, mut = track.muted === true;
+    th.innerHTML =
+      `<span class="tname">${track.type === "video" ? "🎬" : track.type === "audio" ? "🎵" : "🅣"} ${escapeHtml(track.name || track.type)}</span>` +
+      `<button class="tbtn" data-act="vis" title="${vis ? "隐藏该轨（画面与声音都不出）" : "显示该轨"}">${vis ? "👁" : "🚫"}</button>` +
+      (track.type === "text" ? "" : `<button class="tbtn" data-act="mut" title="${mut ? "取消静音" : "静音该轨"}">${mut ? "🔇" : "🔊"}</button>`);
+    th.querySelectorAll(".tbtn").forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        snapshot();
+        if (b.dataset.act === "vis") track.visible = track.visible !== false ? false : true;
+        else track.muted = track.muted !== true;
+        renderAll();
+        setStatus(`${track.name || track.type}：画面${track.visible === false ? "已隐藏" : "显示中"} · 声音${track.muted === true ? "已静音" : "正常"}`);
+      };
+    });
     const lane = document.createElement("div");
     lane.className = "tlane";
-    lane.style.width = width - 96 + "px";
+    lane.style.width = width - 124 + "px";
     lane.dataset.tid = track.id;
     lane.onpointerdown = (e) => {
       if (e.target !== lane) return;
@@ -316,6 +330,26 @@ function deleteSel() {
   renderAll(); setStatus("已删除片段");
 }
 
+/* 波纹删除：删掉选中片段，并把同轨其后片段整体左移，补上腾出的时长 */
+function rippleDeleteSel() {
+  if (!state.sel) return setStatus("先选中一个片段");
+  const hit = findSeg(state.sel.trackId, state.sel.segId);
+  if (!hit) return;
+  snapshot();
+  const { track, seg } = hit;
+  const gap = seg.target_timerange.duration;
+  const from = seg.target_timerange.start;
+  track.segments = track.segments.filter((s) => s.id !== seg.id);
+  let moved = 0;
+  for (const s of track.segments) {
+    if (s.target_timerange.start >= from) { s.target_timerange.start = Math.max(0, s.target_timerange.start - gap); moved++; }
+  }
+  track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  state.sel = null;
+  renderAll();
+  setStatus(`波纹删除：本轨其后 ${moved} 个片段左移 ${(gap / US).toFixed(2)}s`);
+}
+
 /* ============ 属性面板 ============ */
 function renderProps() {
   const body = $("#propBody");
@@ -344,6 +378,9 @@ function renderProps() {
     html += R("位置 Y", "ty", clip.transform.y, -900, 900, 1, null, (v) => v);
     html += R("旋转", "rot", clip.rotation || 0, -180, 180, 1, null, (v) => v + "°");
     html += R("不透明度", "alpha", clip.alpha, 0, 1, 0.01, null, (v) => Math.round(v * 100) + "%");
+    const fade = (seg.fade = seg.fade || { in: 0, out: 0 });
+    html += `<div class="row"><label>淡入(秒)</label><input type="number" data-k="fadeIn" min="0" step="0.1" value="${((fade.in || 0) / US).toFixed(2)}"><span class="val">≤ 片段时长</span></div>`;
+    html += `<div class="row"><label>淡出(秒)</label><input type="number" data-k="fadeOut" min="0" step="0.1" value="${((fade.out || 0) / US).toFixed(2)}"><span class="val">≤ 片段时长</span></div>`;
   }
   html += R("速度", "speed", seg.speed || 1, 0.25, 4, 0.05, null, (v) => v.toFixed(2) + "x");
   if (mat && mat._kind !== "images") html += R("音量", "volume", seg.volume ?? 1, 0, 2, 0.01, null, (v) => Math.round(v * 100) + "%");
@@ -360,6 +397,11 @@ function renderProps() {
       else if (k === "ty") clip.transform.y = v;
       else if (k === "rot") clip.rotation = v;
       else if (k === "alpha") clip.alpha = v;
+      else if (k === "fadeIn" || k === "fadeOut") {
+        const us = Math.max(0, Math.min(seg.target_timerange.duration, Math.round(v * US)));
+        seg.fade = seg.fade || { in: 0, out: 0 };
+        if (k === "fadeIn") seg.fade.in = us; else seg.fade.out = us;
+      }
       else if (k === "speed") {
         const sp = v, sp0 = seg.speed || 1;
         seg.speed = sp;
@@ -375,36 +417,83 @@ function renderProps() {
 }
 
 /* ============ 播放器 ============ */
-const els = new Map();   // materialId -> HTMLMediaElement
-function elFor(mat) {
-  let el = els.get(mat.id);
+// 元素按【片段】而不是按素材缓存：同一素材在同一时刻被多个片段引用时，
+// 各片段各用各的元素，源时间 / 变速 / 音量 / 静音互不干扰。
+const els = new Map();   // segId -> HTMLMediaElement
+function elForSeg(seg, mat) {
+  if (!mat || !mat.path) return null;
+  const want = "file:///" + encodeURI(String(mat.path).replace(/\\/g, "/"));
+  let el = els.get(seg.id);
   if (!el) {
     el = document.createElement(mat._kind === "audios" ? "audio" : "video");
-    el.src = "file:///" + encodeURI(String(mat.path).replace(/\\/g, "/"));
     el.preload = "auto";
     el.crossOrigin = "anonymous";
     el.style.display = "none";
+    // seek 完成后重画：暂停状态下拖播放头，画面才会跟着走
+    el.onseeked = () => { if (!state.playing) drawFrame(state.playhead); };
     document.body.appendChild(el);
-    els.set(mat.id, el);
+    els.set(seg.id, el);
   }
+  if (el.dataset.src !== want) { el.dataset.src = want; el.src = want; }
   return el;
 }
-function syncEl(seg) {
-  const mat = materialOf(seg.material_id);
-  if (!mat) return;
-  const el = elFor(mat);
-  el.playbackRate = Math.min(4, Math.max(0.25, seg.speed || 1));
-  if (el.volume !== undefined) el.volume = Math.min(1, seg.volume ?? 1);
+/** 丢掉时间轴上已不存在的片段元素（撤销/重做/打开工程/删除之后） */
+function pruneEls() {
+  const live = new Set();
+  for (const t of state.project.tracks) for (const s of t.segments) live.add(s.id);
+  for (const [k, el] of els) {
+    if (live.has(k)) continue;
+    try { el.pause(); el.removeAttribute("src"); el.load(); } catch (_) {}
+    el.remove();
+    els.delete(k);
+  }
 }
+function syncEl(seg, track) {
+  const mat = materialOf(seg.material_id);
+  if (!mat) return null;
+  const el = elForSeg(seg, mat);
+  if (!el) return null;
+  el.playbackRate = Math.min(4, Math.max(0.25, seg.speed || 1));
+  const muted = (track && track.muted === true) || seg.volume === 0;
+  el.muted = muted;
+  if (el.volume !== undefined) el.volume = muted ? 0 : Math.min(1, seg.volume ?? 1);
+  return el;
+}
+/** 轨道被隐藏：不出画面也不出声 */
+const trackHidden = (t) => !!t && t.visible === false;
 function activeSegments(tUs) {
   const out = [];
   for (const track of trackOrder()) {
+    if (trackHidden(track)) continue;
     for (const s of track.segments) {
       const { start, duration } = s.target_timerange;
       if (tUs >= start && tUs < start + duration) out.push({ track, seg: s, mat: materialOf(s.material_id) });
     }
   }
   return out;
+}
+/** 淡入淡出对 alpha 的系数（与导出侧 fade 滤镜同一语义：线性 ramp） */
+function fadeFactor(seg, tUs) {
+  const f = seg.fade || {};
+  const { start, duration } = seg.target_timerange;
+  const rel = tUs - start;
+  let a = 1;
+  if (f.in > 0) a = Math.min(a, Math.max(0, Math.min(1, rel / f.in)));
+  if (f.out > 0) a = Math.min(a, Math.max(0, Math.min(1, (duration - rel) / f.out)));
+  return a;
+}
+/** 把各活动片段的元素 seek 到对应源时间（暂停时拖播放头画面才会跟着走） */
+function seekEls(tUs) {
+  const act = activeSegments(tUs);
+  const live = new Set(act.map((a) => a.seg.id));
+  for (const { track, seg } of act) {
+    const el = syncEl(seg, track);
+    if (!el) continue;
+    const want = Math.max(0, srcTimeUs(seg, tUs) / US);
+    if (Math.abs(el.currentTime - want) > 0.04) el.currentTime = want;
+    if (!state.playing && !el.paused) el.pause();
+  }
+  for (const [k, el] of els) if (!live.has(k) && !el.paused) el.pause();
 }
 function srcTimeUs(seg, tUs) {
   const dt = tUs - seg.target_timerange.start;
@@ -421,12 +510,13 @@ function drawFrame(tUs) {
   const act = activeSegments(tUs);
   for (const { track, seg, mat } of act) {
     if (!isVisual(mat)) continue;
-    const el = elFor(mat);
+    const el = syncEl(seg, track);
+    if (!el) continue;
     const clip = seg.clip || {};
     const scale = clip.scale || { x: 1, y: 1 };
     const tf = clip.transform || { x: 0, y: 0 };
     ctx.save();
-    ctx.globalAlpha = clip.alpha ?? 1;
+    ctx.globalAlpha = (clip.alpha ?? 1) * fadeFactor(seg, tUs);
     ctx.translate(W / 2 + (tf.x || 0), H / 2 + (tf.y || 0));
     if (clip.rotation) ctx.rotate((clip.rotation * Math.PI) / 180);
     const vw = el.videoWidth || mat.width || W, vh = el.videoHeight || mat.height || H;
@@ -440,7 +530,7 @@ function drawFrame(tUs) {
     if (!mat || mat._kind !== "texts") continue;
     const clip = seg.clip || {}, tf = clip.transform || { x: 0, y: 0 };
     ctx.save();
-    ctx.globalAlpha = clip.alpha ?? 1;
+    ctx.globalAlpha = (clip.alpha ?? 1) * fadeFactor(seg, tUs);
     ctx.font = `600 ${((mat.size || 72) * (clip.scale?.x || 1)) | 0}px "Microsoft YaHei", sans-serif`;
     ctx.fillStyle = mat.color || "#FFFFFF";
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -462,23 +552,26 @@ function play() {
   if (state.playhead >= total) state.playhead = 0;
   state.playing = true; $("#btnPlay").textContent = "⏸";
   anchorWall = performance.now(); anchorUs = state.playhead;
-  for (const { seg, mat } of activeSegments(state.playhead)) { if (mat) { syncEl(seg); elFor(mat).play().catch(() => {}); } }
+  for (const { track, seg } of activeSegments(state.playhead)) {
+    const el = syncEl(seg, track);
+    if (el) el.play().catch(() => {});
+  }
   const loop = () => {
     if (!state.playing) return;
     const t = anchorUs + (performance.now() - anchorWall) * 1000;
     if (t >= total) { state.playhead = total; pause(); drawFrame(state.playhead); return; }
     state.playhead = t;
     const act = activeSegments(t);
-    const live = new Set(act.map((a) => a.mat && a.mat.id));
-    for (const [id, el] of els) {
-      const a = act.find((x) => x.mat && x.mat.id === id);
-      if (a) {
-        const want = srcTimeUs(a.seg, t) / US;
-        if (Math.abs(el.currentTime - want) > 0.28) el.currentTime = want;
-        syncEl(a.seg);
-        if (el.paused) el.play().catch(() => {});
-      } else if (!el.paused) el.pause();
+    const live = new Set();
+    for (const { track, seg } of act) {
+      const el = syncEl(seg, track);
+      if (!el) continue;
+      live.add(seg.id);
+      const want = srcTimeUs(seg, t) / US;
+      if (Math.abs(el.currentTime - want) > 0.28) el.currentTime = want;
+      if (el.paused) el.play().catch(() => {});
     }
+    for (const [k, el] of els) if (!live.has(k) && !el.paused) el.pause();
     drawFrame(t);
     positionPlayhead();
     rafId = requestAnimationFrame(loop);
@@ -493,15 +586,17 @@ function pause() {
 }
 function setPlayhead(us) {
   state.playhead = Math.max(0, Math.min(us, projectDuration()));
+  seekEls(state.playhead);      // 暂停状态下也要让画面跟到该时刻
   drawFrame(state.playhead); positionPlayhead();
 }
 function positionPlayhead() {
-  $("#playhead").style.left = (px(state.playhead) + 96) + "px";
+  $("#playhead").style.left = (px(state.playhead) + 124) + "px";
   $("#playhead").style.height = ($("#tracks").scrollHeight || 0) + "px";
 }
 
 /* ============ 顶层渲染 ============ */
 function renderAll() {
+  pruneEls();
   renderTimeline(); renderProps(); renderMedia(); drawFrame(state.playhead); renderCueList();
   $("#projName").value = state.project.name || "未命名工程";
   $("#btnUndo").disabled = !state.undo.length;
@@ -544,6 +639,7 @@ $("#btnExport").onclick = exportVideo;
 $("#btnPlay").onclick = () => (state.playing ? pause() : play());
 $("#btnSplit").onclick = splitAtPlayhead;
 $("#btnDelete").onclick = deleteSel;
+$("#btnRippleDel").onclick = rippleDeleteSel;
 $("#btnUndo").onclick = undo;
 $("#btnRedo").onclick = redo;
 $("#btnAddVideoTrack").onclick = () => { snapshot(); state.project.tracks.push({ id: nextId("tk"), type: "video", name: "画中画", segments: [] }); renderAll(); };
@@ -571,7 +667,7 @@ window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
   if (e.code === "Space") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (e.key === "s" || e.key === "S") splitAtPlayhead();
-  else if (e.key === "Delete" || e.key === "Backspace") deleteSel();
+  else if (e.key === "Delete" || e.key === "Backspace") { e.shiftKey ? rippleDeleteSel() : deleteSel(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveProject(); }
