@@ -11,6 +11,8 @@ const state = {
   playhead: 0,          // 微秒
   playing: false,
   pxPerSec: 120,
+  snap: true,           // 磁吸：候选边来自所有轨道，可关
+  ripple: false,        // 波纹插入：插入素材时把该时刻之后的片段整体右移
   undo: [], redo: [],
   info: null,
   exportUs: 0,
@@ -116,11 +118,12 @@ function renderMedia() {
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 /* 把素材加到合适轨道 */
-function addToTrackBest(mat, startUs) {
+function addToTrackBest(mat, startUs, trackHint) {
   snapshot();
   const lane = mat.kind === "video" || mat.kind === "image" ? "video"
     : mat.kind === "audio" ? "audio" : "text";
-  let track = state.project.tracks.find((t) => t.type === lane)
+  let track = (trackHint && trackHint.type === lane ? trackHint : null)
+    || state.project.tracks.find((t) => t.type === lane)
     || state.project.tracks.find((t) => t.type === "video");
   if (!track) { track = { id: nextId("tk"), type: "video", name: "主轨", segments: [] }; state.project.tracks.unshift(track); }
   const dur = mat.duration || 5 * US;
@@ -139,6 +142,21 @@ function freeStartOn(track, dur) {
   let end = 0;
   for (const s of track.segments) end = Math.max(end, s.target_timerange.start + s.target_timerange.duration);
   return end;
+}
+
+/** 插入素材到指定轨道：波纹插入开启时，先把该时刻之后的片段整体右移，避免覆盖。
+ *  （关闭时行为与以前一致：直接落在该位置，允许重叠。） */
+function insertMaterial(mat, track, atUs) {
+  const d = mat.duration || 5 * US;
+  const at = Math.max(0, Math.round(atUs));
+  if (track && state.ripple) {
+    let moved = 0;
+    for (const s of track.segments) {
+      if (s.target_timerange.start >= at) { s.target_timerange.start += d; moved++; }
+    }
+    if (moved) setStatus(`波纹插入：其后 ${moved} 个片段右移 ${(d / US).toFixed(2)}s`);
+  }
+  return addToTrackBest(mat, at, track);
 }
 
 /* 新增文字 */
@@ -225,7 +243,7 @@ function renderTimeline() {
       const rect = lane.getBoundingClientRect();
       const us = pxToUs(e.clientX - rect.left + lane.scrollLeft);
       const mat = materialOf(mid);
-      if (mat) addToTrackBest(mat, Math.max(0, us));
+      if (mat) insertMaterial(mat, track, Math.max(0, us));
     };
     for (const seg of track.segments) {
       const mat = materialOf(seg.material_id);
@@ -324,10 +342,16 @@ function addTransition(durUs = 5e5, type = "dissolve") {
   if (D < 1e5) return setStatus("片段太短，转场至少需要 0.1s");
   snapshot();
   // 记下受影响的原值，去掉转场时原样还回去（不吞掉用户自己设的淡入淡出）
-  const prev = { segFadeOut: seg.fade?.out || 0, nextFadeIn: next.fade?.in || 0, nextSlide: next.slide || null };
+  const prev = {
+    segFadeOut: seg.fade?.out || 0, nextFadeIn: next.fade?.in || 0, nextSlide: next.slide || null,
+    segAFadeOut: seg.fade?.aout || 0, nextAFadeIn: next.fade?.ain || 0,
+  };
   next.target_timerange.start = Math.max(0, next.target_timerange.start - D);
-  next.fade = { in: next.fade?.in || 0, out: next.fade?.out || 0 };
+  next.fade = { in: next.fade?.in || 0, out: next.fade?.out || 0, ain: next.fade?.ain || 0, aout: next.fade?.aout || 0 };
   next.slide = null;
+  // 音频交叉淡化：转场的重叠区间里前段音频淡出、后段音频淡入（与画面同口径，两侧一致）
+  seg.fade = { ...(seg.fade || {}), in: seg.fade?.in || 0, out: seg.fade?.out || 0, ain: seg.fade?.ain || 0, aout: D };
+  next.fade.ain = D;
   if (type === "fadeblack") {
     // 前者淡出到黑 + 后者淡入：中点最暗，是"黑场"而不是溶解
     next.fade.in = D;
@@ -358,9 +382,10 @@ function removeTransition() {
   if (next) {
     next.target_timerange.start += D;                // 把重叠还回去
     if (next.fade) next.fade.in = saved.nextFadeIn || 0;
+    if (next.fade) next.fade.ain = saved.nextAFadeIn || 0;
     next.slide = saved.nextSlide || null;
   }
-  seg.fade = { in: seg.fade?.in || 0, out: saved.segFadeOut || 0 };
+  seg.fade = { ...(seg.fade || {}), in: seg.fade?.in || 0, out: saved.segFadeOut || 0, aout: saved.segAFadeOut || 0 };
   delete seg.transition;
   track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   renderAll();
@@ -368,6 +393,20 @@ function removeTransition() {
 }
 
 /* 片段拖动 / 修剪 */
+/** 磁吸候选边：所有轨道的片段首尾 + 0 + 播放头（排除指定片段）。
+ *  独立成函数是为了能直接测：跨轨吸附是否真的生效、关掉磁吸后是否只剩 0/播放头。 */
+function snapCandidates(excludeIds) {
+  const ex = excludeIds instanceof Set ? excludeIds : new Set(excludeIds || []);
+  const cands = [0, state.playhead];
+  if (state.snap === false) return cands;
+  for (const t of state.project.tracks) {
+    for (const s of t.segments) {
+      if (ex.has(s.id)) continue;
+      cands.push(s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration);
+    }
+  }
+  return cands;
+}
 function startClipDrag(e, trackId, segId, el) {
   e.stopPropagation();
   const hit = findSeg(trackId, segId);
@@ -384,13 +423,13 @@ function startClipDrag(e, trackId, segId, el) {
   const x0 = e.clientX;
   const orig = sel.map((s) => ({ ref: s, o: JSON.parse(JSON.stringify(s.seg)) }));
   const primary = orig.find((x) => x.ref.seg.id === segId) || orig[0];
-  const others = hit.track.segments.filter((s) => !orig.some((x) => x.ref.seg.id === s.id))
-    .flatMap((s) => [s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration]);
+  // 整轨磁吸：候选边来自【所有轨道】（不只当前轨），跨轨对齐也能吸上；state.snap=false 时只剩 0 与播放头
+  const selectedIds = new Set(orig.map((x) => x.ref.seg.id));
+  const cands = snapCandidates(selectedIds);
   snapshot();
   const onMove = (ev) => {
     const delta = pxToUs(ev.clientX - x0);
     const snap = (v) => {
-      const cands = [0, state.playhead, ...others];
       const tol = pxToUs(8);
       for (const c of cands) if (Math.abs(v - c) < tol) return c;
       return v;
@@ -612,6 +651,12 @@ function renderProps() {
         `<button class="del" data-kf="${i}" title="删掉这个关键帧">✕</button></div>`).join("") + `</div>`;
     }
   }
+  const hasAud = !!(mat && (mat._kind === "audios" || (mat._kind === "videos" && mat.hasAudio !== false)));
+  if (hasAud) {
+    const af = (seg.fade = seg.fade || { in: 0, out: 0 });
+    html += `<div class="row"><label>音频淡入(秒)</label><input type="number" data-k="afadeIn" min="0" step="0.1" value="${((af.ain || 0) / US).toFixed(2)}"><span class="val">实听</span></div>`;
+    html += `<div class="row"><label>音频淡出(秒)</label><input type="number" data-k="afadeOut" min="0" step="0.1" value="${((af.aout || 0) / US).toFixed(2)}"><span class="val">实听</span></div>`;
+  }
   html += R("速度", "speed", seg.speed || 1, 0.25, 4, 0.05, null, (v) => v.toFixed(2) + "x");
   if (mat && mat._kind !== "images") html += R("音量", "volume", seg.volume ?? 1, 0, 2, 0.01, null, (v) => Math.round(v * 100) + "%");
   if (mat) html += `<div class="row"><label>素材</label><span class="tag">${escapeHtml(mat.name || mat.content || "")}</span></div>`;
@@ -646,6 +691,11 @@ function renderProps() {
         const us = Math.max(0, Math.min(seg.target_timerange.duration, Math.round(v * US)));
         seg.fade = seg.fade || { in: 0, out: 0 };
         if (k === "fadeIn") seg.fade.in = us; else seg.fade.out = us;
+      }
+      else if (k === "afadeIn" || k === "afadeOut") {
+        const us = Math.max(0, Math.min(seg.target_timerange.duration, Math.round(v * US)));
+        seg.fade = seg.fade || { in: 0, out: 0 };
+        if (k === "afadeIn") seg.fade.ain = us; else seg.fade.aout = us;
       }
       else if (k === "speed") {
         const sp = v, sp0 = seg.speed || 1;
@@ -699,6 +749,38 @@ function pruneEls() {
     els.delete(k);
   }
 }
+/* 音频淡变：把元素接进 WebAudio，用 gain 做音量与淡变包络。
+   注意：元素一旦 createMediaElementSource，声音就只走这条图（默认直连会被切断），
+   所以 gain 同时承担音量；AudioContext 不可用时回落到元素 volume（画面淡变不受影响）。 */
+let AC = null;
+function audioGain(el) {
+  if (el._gain === undefined) {
+    el._gain = null;
+    if (typeof AudioContext !== "undefined") {
+      try {
+        AC = AC || new AudioContext();
+        const src = AC.createMediaElementSource(el);
+        const g = AC.createGain();
+        src.connect(g); g.connect(AC.destination);
+        el._gain = g;
+      } catch (e) {
+        el._gain = null;
+        window.__audioErr = String((e && e.message) || e);   // 记录下来，供冒烟测试显示真实原因
+      }
+    }
+  }
+  return el._gain;
+}
+/** 音频淡变系数（与导出侧 afade 同一语义：线性 ramp，基于片段自身时间轴） */
+function aFadeFactor(seg, tUs) {
+  const af = seg.fade || {};
+  const tt = seg.target_timerange;
+  const rel = tUs - tt.start;
+  let a = 1;
+  if (af.ain > 0) a = Math.min(a, Math.max(0, Math.min(1, rel / af.ain)));
+  if (af.aout > 0) a = Math.min(a, Math.max(0, Math.min(1, (tt.duration - rel) / af.aout)));
+  return a;
+}
 function syncEl(seg, track) {
   const mat = materialOf(seg.material_id);
   if (!mat) return null;
@@ -707,7 +789,15 @@ function syncEl(seg, track) {
   el.playbackRate = Math.min(4, Math.max(0.25, seg.speed || 1));
   const muted = (track && track.muted === true) || seg.volume === 0;
   el.muted = muted;
-  if (el.volume !== undefined) el.volume = muted ? 0 : Math.min(1, seg.volume ?? 1);
+  const vol = muted ? 0 : Math.min(1, seg.volume ?? 1);
+  const g = audioGain(el);
+  if (g) {
+    // 每帧写一次 gain：淡变包络跟着播放头走，不必预排事件
+    g.gain.value = vol * aFadeFactor(seg, state.playhead);
+    if (el.volume !== 1) el.volume = 1;
+  } else if (el.volume !== undefined) {
+    el.volume = vol;
+  }
   return el;
 }
 /** 轨道被隐藏：不出画面也不出声 */
@@ -802,6 +892,7 @@ function drawFrame(tUs) {
 let rafId = null, anchorWall = 0, anchorUs = 0;
 function play() {
   if (state.playing) return;
+  if (AC && AC.state === "suspended") AC.resume().catch(() => {});   // 首次播放时唤醒音频上下文
   const total = projectDuration();
   if (state.playhead >= total) state.playhead = 0;
   state.playing = true; $("#btnPlay").textContent = "⏸";
@@ -855,6 +946,8 @@ function renderAll() {
   $("#projName").value = state.project.name || "未命名工程";
   $("#btnUndo").disabled = !state.undo.length;
   $("#btnRedo").disabled = !state.redo.length;
+  $("#btnSnap").classList.toggle("toggle-on", state.snap !== false);
+  $("#btnRipple").classList.toggle("toggle-on", state.ripple === true);
 }
 function setStatus(s) { $("#status").textContent = s; }
 
@@ -894,6 +987,16 @@ $("#btnPlay").onclick = () => (state.playing ? pause() : play());
 $("#btnSplit").onclick = splitAtPlayhead;
 $("#btnDelete").onclick = deleteSel;
 $("#btnRippleDel").onclick = rippleDeleteSel;
+$("#btnSnap").onclick = () => {
+  state.snap = state.snap === false;
+  renderAll();
+  setStatus(state.snap === false ? "磁吸已关闭" : "磁吸已开启（跨轨吸附片段边缘与播放头）");
+};
+$("#btnRipple").onclick = () => {
+  state.ripple = !state.ripple;
+  renderAll();
+  setStatus(state.ripple ? "波纹插入已开启：拖入素材会把该时刻之后的片段右移" : "波纹插入已关闭");
+};
 $("#btnTransition").onclick = () => {
   const dur = (parseFloat($("#trDur").value) || 0.5) * US;
   addTransition(dur, $("#trType").value);

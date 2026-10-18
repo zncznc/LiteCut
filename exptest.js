@@ -47,6 +47,13 @@ function brightPixels(file, atSec, w, h, x, y) {
   }
   return n;
 }
+/** 指定时间窗内的平均音量(dB) —— 用来验音频淡变的真实包络（不是只看滤镜字符串） */
+function meanVolume(file, atSec, durSec) {
+  const r = spawnSync(FFMPEG, ["-v", "info", "-ss", String(atSec), "-t", String(durSec), "-i", file,
+    "-af", "volumedetect", "-f", "null", "-"], { encoding: "utf8", maxBuffer: 1 << 22 });
+  const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(r.stderr || "");
+  return m ? parseFloat(m[1]) : NaN;
+}
 let pass = 0, fail = 0;
 const check = (name, ok, extra = "") => { ok ? pass++ : fail++; console.log("   %s %s %s", ok ? "PASS" : "FAIL", name, extra); };
 const canvas = { width: 1920, height: 1080, background: "black", ratio: "16:9" };
@@ -376,6 +383,42 @@ console.log("== 14) T13 字幕淡入（片段起点 3s） ==");
   const late = brightPixels(out, 4.0, 1400, 300, 260, 390);
   console.log("   亮像素 t=3.1s（淡入 10%%）: %d | t=4.0s（淡入完成）: %d", early, late);
   check("字幕淡入按绝对时间：3.1s 基本没字", early >= 0 && late > 200 && early < late / 3, `${early} → ${late}`);
+}
+
+/* ---------- T14 音频淡变（afade）与转场音频交叉淡化 ---------- */
+console.log("== 15) T14 音频淡变 ==");
+{
+  const segA = { id: "s1", material_id: "a1", visible: true, speed: 1, volume: 1,
+    fade: { in: 0, out: 0, ain: 1 * US, aout: 0 },
+    target_timerange: { start: 0, duration: 3 * US }, source_timerange: { start: 0, duration: 3 * US } };
+  const p = mkProject([{ id: "tk-a", type: "audio", name: "音频", segments: [segA] }]);
+  p.materials = { videos: [], audios: [matAudio("a1", TONE, 4 * US)], texts: [] };
+  const out = path.join(W, "afade.mp4");
+  const c = buildExport(p, out);
+  console.log("   滤镜含 afade:", /afade=/.test(c.filter), "| summary.audioFades =", c.summary.audioFades);
+  sh(c.args, "导出（音频淡入）");
+  const head = meanVolume(out, 0.05, 0.25), mid = meanVolume(out, 1.4, 0.3);
+  console.log("   平均音量：淡入头(0.05~0.30s) %.1f dB ｜ 中段(1.4~1.7s) %.1f dB", head, mid);
+  check("滤镜含 afade=t=in", /afade=t=in/.test(c.filter) && c.summary.audioFades === 1);
+  check("淡入头明显轻于中段（≥6dB）", head < mid - 6, `${head.toFixed(1)} vs ${mid.toFixed(1)}`);
+
+  // 淡出 + 转场式交叉淡化（前段 aout、后段 ain 同长度）
+  const p2 = mkProject([{ id: "tk-a", type: "audio", name: "音频", segments: [
+    { id: "s1", material_id: "a1", visible: true, speed: 1, volume: 1, fade: { ain: 0, aout: 0.5 * US },
+      target_timerange: { start: 0, duration: 2 * US }, source_timerange: { start: 0, duration: 2 * US } },
+    { id: "s2", material_id: "a1", visible: true, speed: 1, volume: 1, fade: { ain: 0.5 * US, aout: 0 },
+      target_timerange: { start: 1.5 * US, duration: 2 * US }, source_timerange: { start: 0, duration: 2 * US } },
+  ] }]);
+  p2.materials = p.materials;
+  const out2 = path.join(W, "afade_x.mp4");
+  const c2 = buildExport(p2, out2);
+  sh(c2.args, "导出（音频交叉淡化）");
+  const overlap = meanVolume(out2, 1.55, 0.2), after = meanVolume(out2, 3.0, 0.3);
+  console.log("   交叉区(1.55~1.75s) %.1f dB ｜ 交叉后(3.0~3.3s) %.1f dB", overlap, after);
+  check("交叉淡化：两段各带一条 afade（前段 out / 后段 in）",
+    (c2.filter.match(/afade=/g) || []).length === 2 && /afade=t=out/.test(c2.filter) && /afade=t=in/.test(c2.filter),
+    "afade 数量 " + (c2.filter.match(/afade=/g) || []).length);
+  check("交叉区不静音（两段叠加仍在发声）", !isNaN(overlap) && overlap > -30, overlap.toFixed(1) + " dB");
 }
 
 console.log("\n== 结果: %d 通过 / %d 失败 ==", pass, fail);

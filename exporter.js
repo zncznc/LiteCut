@@ -349,10 +349,16 @@ function buildExport(project, outPath, opts = {}) {
       if (i < 0) { inputs.push(["-i", mat.path]); i = inputs.length - 1; }
       const label = `a${audios.length}`;
       const ms = Math.round(tt.start / 1000);
+      const af = s.fade || {};
+      const afParts =
+        (af.ain > 0 ? `afade=t=in:st=0:d=${sec(af.ain)},` : "") +
+        (af.aout > 0 ? `afade=t=out:st=${sec(Math.max(0, tt.duration - af.aout))}:d=${sec(af.aout)},` : "");
+      if (afParts) summary.audioFades = (summary.audioFades || 0) + 1;
       chains.push(
         `[${i}:a]atrim=start=${sec(st.start)}:end=${sec(st.start + st.duration)},` +
         `asetpts=PTS-STARTPTS,volume=${vol},` +
         (speed !== 1 ? `${atempoChain(speed)},` : "") +
+        afParts +
         `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,` +
         `adelay=${ms}|${ms}[${label}]`);
       audios.push(label);
@@ -402,9 +408,14 @@ function buildAudioExtract(project, outWav) {
       if (i < 0) { inputs.push(["-i", mat.path]); i = inputs.length - 1; }
       const label = `a${audios.length}`;
       const ms = Math.round(tt.start / 1000);
+      const afx = s.fade || {};
+      const afxParts =
+        (afx.ain > 0 ? `afade=t=in:st=0:d=${sec(afx.ain)},` : "") +
+        (afx.aout > 0 ? `afade=t=out:st=${sec(Math.max(0, tt.duration - afx.aout))}:d=${sec(afx.aout)},` : "");
       chains.push(`[${i}:a]atrim=start=${sec(st.start)}:end=${sec(st.start + st.duration)},` +
         `asetpts=PTS-STARTPTS,volume=${s.volume ?? 1},` +
         (speed !== 1 ? `${atempoChain(speed)},` : "") +
+        afxParts +
         `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=${ms}|${ms}[${label}]`);
       audios.push(label);
     }

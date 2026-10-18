@@ -41,6 +41,8 @@ h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; display: flex; align-it
 .btn.small { padding: 3px 9px; font-size: 12px; }
 .btn.round { width: 34px; height: 34px; border-radius: 50%; font-size: 14px; }
 .btn:disabled { opacity: .45; cursor: default; }
+/* 开关型按钮（磁吸 / 波纹插入） */
+.btn.toggle-on { background: #2b4a7d; border-color: #3a5c94; color: #dbe6ff; }
 
 /* 主区 */
 .stage { display: grid; grid-template-columns: 250px 1fr 280px; gap: 8px; padding: 8px; height: calc(100vh - 46px - 300px); min-height: 300px; }

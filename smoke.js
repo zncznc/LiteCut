@@ -387,6 +387,88 @@ app.whenReady().then(async () => {
     check("预览按不透明度关键帧变暗", adv3.midPx[0] > 40 && adv3.midPx[0] < 170, JSON.stringify(adv3.midPx));
     check("属性面板显示关键帧列表", adv3.panelHasKf === true);
 
+    // 4.8) 音频淡变 / 磁吸跨轨 / 波纹插入（界面级）
+    const adv4 = await win.webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const US = 1e6;
+      const clipOf = (id, mid, start, dur, scale) => ({ id, material_id: mid, visible: true, speed: 1, volume: 1,
+        target_timerange: { start, duration: dur }, source_timerange: { start: 0, duration: dur },
+        clip: { alpha: 1, scale: { x: scale, y: scale }, transform: { x: 0, y: 0 }, rotation: 0 } });
+      state.project.tracks = [
+        { id: "tk-v", type: "video", name: "主轨", segments: [clipOf("s1", "mv-red", 0, 2 * US, 1), clipOf("s2", "mv-blue", 2 * US, 2 * US, 1)] },
+        { id: "tk-v2", type: "video", name: "画中画", segments: [clipOf("s9", "mv-blue", 5 * US, 1 * US, 0.3)] },
+        { id: "tk-a", type: "audio", name: "音频", segments: [{ id: "s4", material_id: "ma-tone", visible: true, speed: 1, volume: 1,
+            target_timerange: { start: 0, duration: 4 * US }, source_timerange: { start: 0, duration: 4 * US } }] },
+      ];
+      state.sel = null; state.multi = []; state.snap = true; state.ripple = false;
+      renderAll(); await wait(700);
+
+      // (a) 音频淡变：面板可写 + 包络系数正确 + WebAudio 接线状态
+      state.sel = { trackId: "tk-a", segId: "s4" }; renderProps(); await wait(120);
+      const hasAudioFade = !!document.querySelector('#propBody input[data-k="afadeIn"]')
+        && !!document.querySelector('#propBody input[data-k="afadeOut"]');
+      const inp = document.querySelector('#propBody input[data-k="afadeIn"]');
+      inp.value = "0.6"; inp.dispatchEvent(new Event("input")); await wait(80);
+      const segA = state.project.tracks[2].segments[0];
+      const ainUs = Math.round((segA.fade && segA.fade.ain) || 0);
+      const aMid = aFadeFactor(segA, 0.3 * US), aEnd = aFadeFactor(segA, 2 * US);
+      // 音频片段的播放元素是在 seek 时按需创建的（drawFrame 只管画面），先 seek 一次让它就位
+      setPlayhead(0.2 * US); await wait(400); drawFrame(0.2 * US);
+      const elA = els.get("s4");
+      const hasGain = !!(elA && audioGain(elA));
+      const ctxState = (typeof AC !== "undefined" && AC) ? AC.state : "none";
+      const audioErr = window.__audioErr || "";
+
+      // (b) 转场同时设置音频交叉淡化，并在去转场时还原
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      document.querySelector("#trType").value = "dissolve";
+      document.querySelector("#btnTransition").click(); await wait(150);
+      const v1 = state.project.tracks[0].segments.find((s) => s.id === "s1");
+      const v2 = state.project.tracks[0].segments.find((s) => s.id === "s2");
+      const cross = { s1aout: Math.round((v1.fade && v1.fade.aout) || 0), s2ain: Math.round((v2.fade && v2.fade.ain) || 0) };
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      document.querySelector("#btnUnTransition").click(); await wait(120);
+      const v1b = state.project.tracks[0].segments.find((s) => s.id === "s1");
+      const v2b = state.project.tracks[0].segments.find((s) => s.id === "s2");
+      const restored = { s1aout: Math.round((v1b.fade && v1b.fade.aout) || 0), s2ain: Math.round((v2b.fade && v2b.fade.ain) || 0) };
+
+      // (c) 磁吸候选边跨轨：应含另一条轨道上 s9 的 5s 起点
+      const candsOn = snapCandidates(new Set(["s1"]));
+      const crossTrack = candsOn.includes(5 * US) && candsOn.includes(6 * US);   // s9 在另一条轨上（5~6s）
+      const candsOff = (state.snap = false, snapCandidates(new Set(["s1"])));
+      const snapOffOnlyBase = candsOff.length === 2 && candsOff.includes(0);
+      state.snap = true;
+
+      // (d) 波纹插入：关闭时原地覆盖；开启时把该时刻之后的片段右移
+      const mat = materialOf("mv-blue");
+      const before = state.project.tracks[0].segments.find((s) => s.id === "s2").target_timerange.start / US;
+      state.ripple = false;
+      insertMaterial(mat, state.project.tracks[0], 1 * US); await wait(80);
+      const s2AfterNoRipple = state.project.tracks[0].segments.filter((s) => s.id === "s2")[0];
+      const s2NoRipple = s2AfterNoRipple ? s2AfterNoRipple.target_timerange.start / US : -1;
+
+      undo();                       // 回到插入前的样子
+      state.ripple = true;
+      await wait(80);
+      insertMaterial(materialOf("mv-blue"), state.project.tracks[0], 1 * US); await wait(80);
+      const s2AfterRipple = state.project.tracks[0].segments.find((s) => s.id === "s2");
+      const s2Ripple = s2AfterRipple ? s2AfterRipple.target_timerange.start / US : -1;
+      const inserted = state.project.tracks[0].segments.filter((s) => s.material_id === "mv-blue").length;
+
+      return { hasAudioFade, ainUs, aMid, aEnd, hasGain, ctxState, audioErr, cross, restored,
+               crossTrack, snapOffOnlyBase, candsLen: candsOn.length, before, s2NoRipple, s2Ripple, inserted };
+    })()`);
+    check("属性面板有音频淡入/淡出输入", adv4.hasAudioFade === true);
+    check("音频淡入写进 seg.fade.ain", adv4.ainUs === 600000, String(adv4.ainUs));
+    check("音频淡变包络：0.3s≈半、2.0s 已满", Math.abs(adv4.aMid - 0.5) < 0.03 && adv4.aEnd === 1, JSON.stringify([adv4.aMid, adv4.aEnd]));
+    check("WebAudio 增益已接线（或明确回落）", adv4.hasGain === true || adv4.ctxState === "none", "gain=" + adv4.hasGain + " ctx=" + adv4.ctxState + " err=" + adv4.audioErr);
+    check("转场同时设置音频交叉淡化 0.5s", adv4.cross.s1aout === 500000 && adv4.cross.s2ain === 500000, JSON.stringify(adv4.cross));
+    check("去转场把音频淡变也还原", adv4.restored.s1aout === 0 && adv4.restored.s2ain === 0, JSON.stringify(adv4.restored));
+    check("磁吸候选含跨轨片段边缘", adv4.crossTrack === true, "候选数 " + adv4.candsLen);
+    check("关掉磁吸后只剩 0 与播放头", adv4.snapOffOnlyBase === true);
+    check("波纹插入关闭时原地放置（s2 仍在 2s）", Math.abs(adv4.s2NoRipple - adv4.before) < 0.001, "s2=" + adv4.s2NoRipple);
+    check("波纹插入开启时后续片段右移（s2 2s→5s）", Math.abs(adv4.s2Ripple - 5) < 0.001, "s2=" + adv4.s2Ripple + " 插入后片段数=" + adv4.inserted);
+
     // 5) 截图（顺带验证不是黑屏）
     const img = await win.webContents.capturePage();
     fs.writeFileSync(SHOT, img.toPNG());
