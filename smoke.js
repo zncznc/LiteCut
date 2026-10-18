@@ -252,6 +252,66 @@ app.whenReady().then(async () => {
     check("属性面板有淡入/淡出输入", adv.hasFadeInputs === true);
     check("预览淡入：0.1s 暗于 1.0s", adv.fadeLow[2] < adv.fadeFull[2] - 30, JSON.stringify([adv.fadeLow, adv.fadeFull]));
 
+    // 4.7) 转场 / 多选成组 / 关键帧（界面级）
+    const adv2 = await win.webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const US = 1e6;
+      const clipOf = (id, mid, start, dur) => ({ id, material_id: mid, visible: true, speed: 1, volume: 1,
+        target_timerange: { start, duration: dur }, source_timerange: { start: 0, duration: dur },
+        clip: { alpha: 1, scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0 } });
+      state.project.tracks = [{ id: "tk-v", type: "video", name: "主轨",
+        segments: [clipOf("s1", "mv-red", 0, 2 * US), clipOf("s2", "mv-blue", 2 * US, 2 * US)] }];
+      state.sel = null; state.multi = []; renderAll(); await wait(600);
+
+      // (a) 转场
+      setSelection("tk-v", "s1"); addTransition();
+      const g1 = state.project.tracks[0].segments;
+      const s1 = g1.find((s) => s.id === "s1"), s2 = g1.find((s) => s.id === "s2");
+      const tr = { s2start: s2.target_timerange.start / US, fadeIn: (s2.fade && s2.fade.in) / US || 0,
+                   s1out: (s1.fade && s1.fade.out) || 0, marked: !!(s1.transition && s1.transition.duration) };
+      setPlayhead(1.75 * US); await wait(900); drawFrame(1.75 * US);
+      const dt = document.querySelector("#preview").getContext("2d").getImageData(700, 400, 500, 260).data;
+      let rr = 0, bb = 0, nn = 0;
+      for (let i = 0; i < dt.length; i += 4) { rr += dt[i]; bb += dt[i + 2]; nn++; }
+      const mid = [Math.round(rr / nn), Math.round(bb / nn)];
+
+      // (b) 去转场还原
+      setSelection("tk-v", "s1"); removeTransition();
+      const back = state.project.tracks[0].segments.find((s) => s.id === "s2").target_timerange.start / US;
+
+      // (c) 多选 → 成组 → 点选一个=整组
+      setSelection("tk-v", "s1"); setSelection("tk-v", "s2", "toggle");
+      const nSel = selList().length;
+      groupSelected();
+      const gid = state.project.tracks[0].segments[0].group_id;
+      state.sel = null; state.multi = [];
+      setSelection("tk-v", "s2", "group");
+      const groupSel = selList().length;
+      ungroupSelected();
+      const ungrouped = !state.project.tracks[0].segments[0].group_id;
+
+      // (d) 关键帧：记录两点后中间时刻应插值
+      setSelection("tk-v", "s1");
+      setPlayhead(0.2 * US); keyframeHere();
+      const seg1 = state.project.tracks[0].segments.find((s) => s.id === "s1");
+      setPlayhead(1.8 * US); kfWrite(seg1, "scale", 0.4);
+      const midScale = +kfValueAt(seg1, 1.0 * US).scale.toFixed(3);
+      renderProps();
+      const hasKfRow = !!document.querySelector('#propBody [data-act="kfAdd"]');
+      const kfRows = document.querySelectorAll("#propBody .kfrow").length;
+      return { tr, mid, back, nSel, gid: !!gid, groupSel, ungrouped,
+               kfCount: seg1.keyframes.length, midScale, hasKfRow, kfRows,
+               status: document.querySelector("#status").textContent };
+    })()`);
+    check("转场：后段左移 0.5s、只有上层淡入、前者不淡出", adv2.tr.s2start === 1.5 && adv2.tr.fadeIn === 0.5 && adv2.tr.s1out === 0 && adv2.tr.marked, JSON.stringify(adv2.tr));
+    check("转场中点预览=红蓝混合", adv2.mid[0] > 60 && adv2.mid[1] > 60, JSON.stringify(adv2.mid));
+    check("去转场后重叠还原到 2.0s", Math.abs(adv2.back - 2) < 0.001, "s2 start=" + adv2.back);
+    check("Ctrl 点选=选中 2 个片段", adv2.nSel === 2, String(adv2.nSel));
+    check("成组后点选一个=选中整组", adv2.gid === true && adv2.groupSel === 2, JSON.stringify({ gid: adv2.gid, groupSel: adv2.groupSel }));
+    check("解组生效", adv2.ungrouped === true);
+    check("关键帧：两点插值落在中间", adv2.kfCount === 2 && adv2.midScale > 0.65 && adv2.midScale < 0.75, JSON.stringify({ n: adv2.kfCount, mid: adv2.midScale }));
+    check("属性面板关键帧按钮+列表", adv2.hasKfRow === true && adv2.kfRows === 2, "行数 " + adv2.kfRows);
+
     // 5) 截图（顺带验证不是黑屏）
     const img = await win.webContents.capturePage();
     fs.writeFileSync(SHOT, img.toPNG());

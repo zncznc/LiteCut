@@ -58,6 +58,23 @@ function fadeAlphaExpr(durationUs, fade, base = 1) {
   return base !== 1 ? `(${expr})*${base.toFixed(4)}` : expr;
 }
 
+/** 关键帧的分段线性时间表达式（给 zoompan 的 z/x/y 用）。
+ *  kfs 已按 t 升序；tVar 默认 it = 片段自身时间轴（trim+setpts 之后从 0 起）。 */
+function kfExpr(kfs, field, tVar = "it") {
+  const n = (v) => String(Number(v));
+  const k = kfs;
+  let expr = n(k[k.length - 1][field]);
+  for (let i = k.length - 1; i >= 1; i--) {
+    const a = k[i - 1], b = k[i];
+    const ta = (a.t / 1e6).toFixed(6), tb = (b.t / 1e6).toFixed(6), dt = ((b.t - a.t) / 1e6).toFixed(6);
+    const seg = Number(dt) > 0
+      ? `(${n(a[field])}+(${n(b[field])}-${n(a[field])})*(${tVar}-${ta})/${dt})`
+      : n(b[field]);
+    expr = `if(lte(${tVar},${tb}),${seg},${expr})`;
+  }
+  return `if(lte(${tVar},${(k[0].t / 1e6).toFixed(6)}),${n(k[0][field])},${expr})`;
+}
+
 /** 工程总时长（微秒）：所有轨道片段的最右端 */
 function projectDuration(p) {
   let end = 0;
@@ -110,7 +127,7 @@ function buildExport(project, outPath, opts = {}) {
   const audioOut = [];    // 音频流标签
   const summary = {
     segments: 0, images: 0, texts: 0, audios: 0,
-    rotations: 0, fades: 0, hiddenTracks: 0, mutedTracks: 0, durationUs: durUs,
+    rotations: 0, fades: 0, hiddenTracks: 0, mutedTracks: 0, keyframed: 0, durationUs: durUs,
   };
 
   // 1) 视频层：黑底画布 + 逐个片段叠加
@@ -149,13 +166,29 @@ function buildExport(project, outPath, opts = {}) {
         ? `[${i}:v]fps=${FPS}`
         : `[${i}:v]trim=start=${sec(st.start)}:end=${sec(st.start + st.duration)},setpts=PTS-STARTPTS`;
       if (speed !== 1) f += `,setpts=PTS/${speed}`;
-      // 画面：按 scale 缩放（保持比例）再居中
-      const sw = Math.max(2, Math.round((W * scale.x) / 2) * 2);
-      const sh = Math.max(2, Math.round((H * scale.y) / 2) * 2);
+      // 画面尺寸：走了关键帧就以"最小缩放值"为静态基准，动画交给 zoompan（zoompan 的 zoom 只能 ≥1）
+      const kfList = Array.isArray(s.keyframes) && s.keyframes.length
+        ? [...s.keyframes].sort((a, b) => a.t - b.t) : null;
+      const kfMin = kfList ? Math.max(0.05, Math.min(...kfList.map((k) => k.scale))) : 1;
+      const sw = Math.max(2, Math.round((W * (kfList ? kfMin : scale.x)) / 2) * 2);
+      const sh = Math.max(2, Math.round((H * (kfList ? kfMin : scale.y)) / 2) * 2);
       f += `,scale=${sw}:${sh}:force_original_aspect_ratio=decrease`;
-      f += `,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:color=black@0`;
-      if (alpha < 1) f += `,format=rgba,colorchannelmixer=aa=${alpha}`;
-      f += `,setsar=1,fps=${FPS},format=rgba`;
+      if (kfList) {
+        // 关键帧：先缩到最小缩放值并居中铺满画布（四周透明），再用 zoompan 按时间表达式做缩放/位移。
+        // 实测 zoompan 保留 alpha，所以透明留白不会用黑底盖住下层轨道。
+        f += `,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0`;
+        if (alpha < 1) f += `,format=rgba,colorchannelmixer=aa=${alpha}`;
+        f += `,setsar=1,fps=${FPS},format=rgba`;
+        const zExpr = `(${kfExpr(kfList, "scale")})/${kfMin.toFixed(6)}`;
+        const xExpr = kfExpr(kfList, "x"), yExpr = kfExpr(kfList, "y");
+        f += `,zoompan=z='${zExpr}':x='(iw-iw/zoom)/2+(${xExpr})':y='(ih-ih/zoom)/2+(${yExpr})'` +
+          `:d=1:s=${W}x${H}:fps=${FPS}`;
+        summary.keyframed++;
+      } else {
+        f += `,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:color=black@0`;
+        if (alpha < 1) f += `,format=rgba,colorchannelmixer=aa=${alpha}`;
+        f += `,setsar=1,fps=${FPS},format=rgba`;
+      }
       // 旋转：与预览一致 —— 绕片段中心、四周透明，越出画布的部分由画布边界截断。
       // 实测校准：ffmpeg rotate(+) 与 canvas rotate(+) 的旋向相反，故直接把角度取负后再取负 = 原角
       if (rot) {
@@ -173,7 +206,8 @@ function buildExport(project, outPath, opts = {}) {
       f += `,setpts=PTS+${sec(tt.start)}/TB`;
       const label = `v${vIdx++}`;
       chains.push(`${f}[${label}]`);
-      videoOut.push({ label, start: tt.start, end: tt.start + tt.duration, dx: tf.x, dy: tf.y, sw, sh, rot });
+      videoOut.push({ label, start: tt.start, end: tt.start + tt.duration,
+        dx: kfList ? 0 : tf.x, dy: kfList ? 0 : tf.y, sw, sh, rot });   // 关键帧的位置已由 zoompan 烘进画面
       summary.segments++;
     }
   }
@@ -316,5 +350,5 @@ function buildAudioExtract(project, outWav) {
 
 module.exports = {
   buildExport, buildAudioExtract, projectDuration, materialOf, orderedTracks,
-  findCJKFont, escText, escPath, atempoChain, fadeAlphaExpr, FONT,
+  findCJKFont, escText, escPath, atempoChain, fadeAlphaExpr, kfExpr, FONT,
 };

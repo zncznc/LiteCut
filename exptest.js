@@ -10,6 +10,7 @@ const { FFMPEG, FFPROBE } = require("./tools");
 const W = "C:\\Users\\chaoc\\AppData\\Local\\hermes\\cache\\scratch\\litecut_test";
 const SPLIT = path.join(W, "split.mp4");     // 640x360：左半蓝、右半红
 const RED = path.join(W, "red.mp4");
+const BLUE = path.join(W, "blue.mp4");
 const TONE = path.join(W, "tone.wav");
 const US = 1e6;
 
@@ -72,6 +73,8 @@ sh(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30:d=3",
   "-c:v", "libx264", "-pix_fmt", "yuv420p", SPLIT], "split.mp4（左蓝右红）");
 sh(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30:d=3",
   "-c:v", "libx264", "-pix_fmt", "yuv420p", RED], "red.mp4");
+sh(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=1280x720:r=30:d=3",
+  "-c:v", "libx264", "-pix_fmt", "yuv420p", BLUE], "blue.mp4");
 if (!fs.existsSync(TONE)) sh(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-ac", "1", TONE], "tone.wav");
 
 /* ---------- T1 旋转：竖切 → 横切，且方向与预览（canvas 顺时针）一致 ---------- */
@@ -212,6 +215,51 @@ console.log("== 7) T6 字幕淡入 ==");
   console.log("   亮像素 t=0.15s: %d | t=1.0s: %d", b015, b10);
   check("滤镜含 drawtext alpha 表达式", /alpha='/.test(c.filter));
   check("字幕淡入：0.15s 明显暗于 1.0s", b015 >= 0 && b10 > 0 && b10 > Math.max(3 * b015, 200), `${b015} → ${b10}`);
+}
+
+/* ---------- T7 片段间转场：真交叉溶解（中途不能变暗） ---------- */
+console.log("== 8) T7 转场交叉溶解 ==");
+{
+  const p = mkProject([{ id: "tk-v", type: "video", name: "主轨", segments: [
+    segVideo("s1", "v1", 0, 2 * US),
+    { ...segVideo("s2", "v2", 1.5 * US, 2 * US), fade: { in: 0.5 * US, out: 0 } },   // 上层淡入=溶解
+  ] }]);
+  p.materials = {
+    videos: [matVideo("v1", RED, "red.mp4", 640, 360), matVideo("v2", BLUE, "blue.mp4", 1280, 720)],
+    audios: [], texts: [],
+  };
+  const out = path.join(W, "transition.mp4");
+  const c = buildExport(p, out);
+  sh(c.args, "导出（溶解转场）");
+  const before = avgRGB(out, 1.1), mid = avgRGB(out, 1.75), after = avgRGB(out, 2.4);
+  console.log("   1.1s %s → 1.75s(中点) %s → 2.4s %s", before, mid, after);
+  check("转场前为红", !!before && before[0] > 150 && before[2] < 60, JSON.stringify(before));
+  check("中点=红蓝各半（真交叉溶解）", !!mid && mid[0] > 60 && mid[2] > 60 && Math.abs(mid[0] - mid[2]) < 70, JSON.stringify(mid));
+  check("中点亮度没掉（不是淡经黑底）", !!mid && mid[0] + mid[1] + mid[2] > 150, JSON.stringify(mid));
+  check("转场后为蓝", !!after && after[2] > 150 && after[0] < 60, JSON.stringify(after));
+}
+
+/* ---------- T8 关键帧：缩放 + 位移（zoompan 时间表达式） ---------- */
+console.log("== 9) T8 关键帧（缩放+位移）==");
+{
+  const seg = {
+    ...segVideo("s1", "v1", 0, 2 * US),
+    keyframes: [{ t: 0, x: 0, y: 0, scale: 1 }, { t: 2 * US, x: 500, y: 0, scale: 0.4 }],
+  };
+  const p = mkProject([{ id: "tk-v", type: "video", name: "主轨", segments: [seg] }]);
+  p.materials = { videos: [matVideo("v1", RED, "red.mp4", 640, 360)], audios: [], texts: [] };
+  const out = path.join(W, "keyframe.mp4");
+  const c = buildExport(p, out);
+  console.log("   滤镜含 zoompan:", /zoompan=/.test(c.filter), "| summary.keyframed =", c.summary.keyframed);
+  sh(c.args, "导出（关键帧）");
+  const full = avgRGB(out, 0.1);
+  const cornerLate = avgRGB(out, 1.9, { w: 300, h: 200, x: 20, y: 20 });
+  const rightLate = avgRGB(out, 1.9, { w: 400, h: 300, x: 1400, y: 400 });
+  console.log("   0.1s 全幅 %s | 1.9s 左上角 %s | 1.9s 右侧 %s", full, cornerLate, rightLate);
+  check("zoompan 已进滤镜链", /zoompan=/.test(c.filter) && c.summary.keyframed === 1);
+  check("起点满画幅为红", !!full && full[0] > 150, JSON.stringify(full));
+  check("缩小后四角变黑（真的在缩）", !!cornerLate && cornerLate[0] < 60, JSON.stringify(cornerLate));
+  check("右移后右侧仍有画面", !!rightLate && rightLate[0] > 100, JSON.stringify(rightLate));
 }
 
 console.log("\n== 结果: %d 通过 / %d 失败 ==", pass, fail);

@@ -77,6 +77,13 @@ h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; display: flex; align-it
   color: var(--fg); border-radius: 5px; padding: 4px 7px; font: inherit;
 }
 .row .val { width: 46px; text-align: right; color: var(--fg2); font-size: 11px; }
+/* 关键帧列表 */
+.kflist { margin: 2px 0 8px; border-left: 2px solid var(--accent); padding-left: 6px; }
+.kfrow { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg2); padding: 1px 0; }
+.kfrow .kt { width: 40px; font-variant-numeric: tabular-nums; }
+.kfrow .kv { flex: 1; }
+.kfrow .del { background: transparent; border: none; color: var(--fg2); cursor: pointer; font-size: 12px; padding: 0 2px; }
+.kfrow .del:hover { color: var(--danger); }
 
 /* 时间轴 */
 .timeline { height: 300px; margin: 0 8px 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }
