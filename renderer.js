@@ -311,11 +311,11 @@ function ungroupSelected() {
    叠在上层的 B 以 alpha=a 覆盖不透明的 A，得到 out = a*B + (1-a)*A —— 这正是交叉溶解。
    若改成"前者也淡出"，前半段会同时向黑底淡出、中途亮度掉一截（淡经黑底），那是错的做法。
    预览与导出共用同一套 fade 语义，不需要额外的 xfade 滤镜。 */
-function addTransition(durUs = 5e5) {
+function addTransition(durUs = 5e5, type = "dissolve") {
   const sel = selList();
   if (sel.length !== 1) return setStatus("转场需要先选中一个片段（单选）");
   const { track, seg } = sel[0];
-  if (seg.transition) removeTransition();          // 重复点=按新时长重来
+  if (seg.transition) removeTransition();          // 重复点=按新类型/时长重来
   const sorted = [...track.segments].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   const i = sorted.findIndex((s) => s.id === seg.id);
   const next = sorted[i + 1];
@@ -323,12 +323,26 @@ function addTransition(durUs = 5e5) {
   const D = Math.min(durUs, Math.floor(seg.target_timerange.duration / 3), Math.floor(next.target_timerange.duration / 3));
   if (D < 1e5) return setStatus("片段太短，转场至少需要 0.1s");
   snapshot();
+  // 记下受影响的原值，去掉转场时原样还回去（不吞掉用户自己设的淡入淡出）
+  const prev = { segFadeOut: seg.fade?.out || 0, nextFadeIn: next.fade?.in || 0, nextSlide: next.slide || null };
   next.target_timerange.start = Math.max(0, next.target_timerange.start - D);
-  next.fade = { in: D, out: next.fade?.out || 0 };   // 只动上层：前者不淡出
-  seg.transition = { type: "dissolve", duration: D, next_id: next.id };
+  next.fade = { in: next.fade?.in || 0, out: next.fade?.out || 0 };
+  next.slide = null;
+  if (type === "fadeblack") {
+    // 前者淡出到黑 + 后者淡入：中点最暗，是"黑场"而不是溶解
+    next.fade.in = D;
+    seg.fade = { in: seg.fade?.in || 0, out: D };
+  } else if (type === "slideleft" || type === "slideup") {
+    next.slide = { axis: type === "slideup" ? "y" : "x", duration: D };   // 滑入靠位移表达式，不动 alpha
+  } else {
+    next.fade.in = D;                              // 叠化：只动上层，前者不淡出
+    type = "dissolve";
+  }
+  seg.transition = { type, duration: D, next_id: next.id, prev };
   track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   renderAll();
-  setStatus(`已加溶解转场 ${(D / US).toFixed(2)}s（后一片段左移重叠、上层淡入）`);
+  const NAMES = { dissolve: "叠化", fadeblack: "黑场", slideleft: "左滑", slideup: "上滑" };
+  setStatus(`已加${NAMES[type] || "叠化"}转场 ${(D / US).toFixed(2)}s（后一片段左移重叠）`);
 }
 function removeTransition() {
   const sel = selList();
@@ -336,18 +350,21 @@ function removeTransition() {
   const { track, seg } = sel[0];
   if (!seg.transition) return setStatus("这个片段没有转场");
   const D = seg.transition.duration;
+  const saved = seg.transition.prev || {};
   const sorted = [...track.segments].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   const next = (seg.transition.next_id && track.segments.find((s) => s.id === seg.transition.next_id))
     || sorted[sorted.findIndex((s) => s.id === seg.id) + 1];
   snapshot();
   if (next) {
     next.target_timerange.start += D;                // 把重叠还回去
-    if (next.fade) next.fade.in = 0;
+    if (next.fade) next.fade.in = saved.nextFadeIn || 0;
+    next.slide = saved.nextSlide || null;
   }
+  seg.fade = { in: seg.fade?.in || 0, out: saved.segFadeOut || 0 };
   delete seg.transition;
   track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   renderAll();
-  setStatus("已去掉转场（重叠已还原）");
+  setStatus("已去掉转场（重叠与淡入淡出都已还原）");
 }
 
 /* 片段拖动 / 修剪 */
@@ -481,32 +498,53 @@ function kfSorted(seg) {
 }
 function kfBase(seg) {
   const clip = seg.clip || {};
-  return { x: clip.transform?.x || 0, y: clip.transform?.y || 0, scale: clip.scale?.x ?? 1 };
+  return {
+    x: clip.transform?.x || 0, y: clip.transform?.y || 0, scale: clip.scale?.x ?? 1,
+    rotation: clip.rotation || 0, alpha: clip.alpha ?? 1,
+  };
 }
-/** 片段内相对时间 relUs 处的变换（没有关键帧就回落到静态值） */
+/** 片段内相对时间 relUs 处的变换（没有关键帧就回落到静态值；缺哪个字段就回落哪个） */
 function kfValueAt(seg, relUs) {
   const k = kfSorted(seg), base = kfBase(seg);
+  const norm = (o) => ({
+    x: o.x ?? base.x, y: o.y ?? base.y, scale: o.scale ?? base.scale,
+    rotation: o.rotation ?? base.rotation, alpha: o.alpha ?? base.alpha,
+  });
   if (!k.length) return base;
-  if (relUs <= k[0].t) return { x: k[0].x, y: k[0].y, scale: k[0].scale };
+  if (relUs <= k[0].t) return norm(k[0]);
   const last = k[k.length - 1];
-  if (relUs >= last.t) return { x: last.x, y: last.y, scale: last.scale };
+  if (relUs >= last.t) return norm(last);
   for (let i = 1; i < k.length; i++) {
     if (relUs <= k[i].t) {
       const a = k[i - 1], b = k[i], f = (relUs - a.t) / Math.max(1, b.t - a.t);
       const L = (p, q) => p + (q - p) * f;
-      return { x: L(a.x, b.x), y: L(a.y, b.y), scale: L(a.scale, b.scale) };
+      const A = norm(a), B = norm(b);
+      return {
+        x: L(A.x, B.x), y: L(A.y, B.y), scale: L(A.scale, B.scale),
+        rotation: L(A.rotation, B.rotation), alpha: L(A.alpha, B.alpha),
+      };
     }
   }
   return base;
 }
-/** 把某个字段写进"播放头所在时刻"的关键帧（不存在则新建） */
+/** 滑动类转场在 tUs 时刻的位移（与导出侧 overlay 的 ramp 同一公式） */
+function slideOffsetAt(seg, tUs) {
+  const sl = seg && seg.slide;
+  if (!sl || !sl.duration) return { x: 0, y: 0 };
+  const tt = seg.target_timerange;
+  const ramp = Math.max(0, Math.min(1, (tUs - tt.start) / sl.duration));
+  const { width: W, height: H } = state.project.canvas_config;
+  const left = 1 - ramp;
+  return sl.axis === "y" ? { x: 0, y: left * H } : { x: left * W, y: 0 };
+}
+/** 把某个字段写进"播放头所在时刻"的关键帧（不存在则新建；其余字段取当前插值，避免被改掉） */
 function kfWrite(seg, field, value) {
   const tt = seg.target_timerange;
   const t = Math.max(0, Math.min(tt.duration, Math.round(state.playhead - tt.start)));
   const v = kfValueAt(seg, t);
   seg.keyframes = (seg.keyframes || []).filter((k) => Math.abs(k.t - t) > US / 30);
-  const nv = { x: v.x, y: v.y, scale: v.scale, [field]: value };
-  seg.keyframes.push({ t, x: nv.x, y: nv.y, scale: nv.scale });
+  const nv = { x: v.x, y: v.y, scale: v.scale, rotation: v.rotation, alpha: v.alpha, [field]: value };
+  seg.keyframes.push({ t, x: nv.x, y: nv.y, scale: nv.scale, rotation: nv.rotation, alpha: nv.alpha });
   seg.keyframes.sort((a, b) => a.t - b.t);
 }
 /** 播放头处记录一个关键帧（值取当前插值结果，便于"定点微调"） */
@@ -558,8 +596,8 @@ function renderProps() {
     html += R("缩放", "scale", kfOn ? cur.scale : clip.scale.x, 0.1, 3, 0.01, null, (v) => Math.round(v * 100) + "%");
     html += R("位置 X", "tx", kfOn ? cur.x : clip.transform.x, -1600, 1600, 1, null, (v) => v);
     html += R("位置 Y", "ty", kfOn ? cur.y : clip.transform.y, -900, 900, 1, null, (v) => v);
-    html += R("旋转", "rot", clip.rotation || 0, -180, 180, 1, null, (v) => v + "°");
-    html += R("不透明度", "alpha", clip.alpha, 0, 1, 0.01, null, (v) => Math.round(v * 100) + "%");
+    html += R("旋转", "rot", kfOn ? cur.rotation : (clip.rotation || 0), -180, 180, 1, null, (v) => v + "°");
+    html += R("不透明度", "alpha", kfOn ? cur.alpha : clip.alpha, 0, 1, 0.01, null, (v) => Math.round(v * 100) + "%");
     const fade = (seg.fade = seg.fade || { in: 0, out: 0 });
     html += `<div class="row"><label>淡入(秒)</label><input type="number" data-k="fadeIn" min="0" step="0.1" value="${((fade.in || 0) / US).toFixed(2)}"><span class="val">≤ 片段时长</span></div>`;
     html += `<div class="row"><label>淡出(秒)</label><input type="number" data-k="fadeOut" min="0" step="0.1" value="${((fade.out || 0) / US).toFixed(2)}"><span class="val">≤ 片段时长</span></div>`;
@@ -596,8 +634,14 @@ function renderProps() {
         if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "y", v);
         else clip.transform.y = v;
       }
-      else if (k === "rot") clip.rotation = v;
-      else if (k === "alpha") clip.alpha = v;
+      else if (k === "rot") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "rotation", v);
+        else clip.rotation = v;
+      }
+      else if (k === "alpha") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "alpha", v);
+        else clip.alpha = v;
+      }
       else if (k === "fadeIn" || k === "fadeOut") {
         const us = Math.max(0, Math.min(seg.target_timerange.duration, Math.round(v * US)));
         seg.fade = seg.fade || { in: 0, out: 0 };
@@ -721,12 +765,13 @@ function drawFrame(tUs) {
     if (!el) continue;
     const clip = seg.clip || {};
     const kf = kfValueAt(seg, tUs - seg.target_timerange.start);   // 关键帧优先，无关键帧=静态值
+    const slide = slideOffsetAt(seg, tUs);                         // 滑动类转场的位移
     const scale = { x: kf.scale, y: kf.scale };
-    const tf = { x: kf.x, y: kf.y };
+    const tf = { x: kf.x + slide.x, y: kf.y + slide.y };
     ctx.save();
-    ctx.globalAlpha = (clip.alpha ?? 1) * fadeFactor(seg, tUs);
+    ctx.globalAlpha = Math.max(0, Math.min(1, kf.alpha)) * fadeFactor(seg, tUs);
     ctx.translate(W / 2 + (tf.x || 0), H / 2 + (tf.y || 0));
-    if (clip.rotation) ctx.rotate((clip.rotation * Math.PI) / 180);
+    if (kf.rotation) ctx.rotate((kf.rotation * Math.PI) / 180);
     const vw = el.videoWidth || mat.width || W, vh = el.videoHeight || mat.height || H;
     const k = Math.min((W * scale.x) / vw, (H * scale.y) / vh);
     const dw = vw * k, dh = vh * k;
@@ -736,14 +781,15 @@ function drawFrame(tUs) {
   // 文字层
   for (const { track, seg, mat } of act) {
     if (!mat || mat._kind !== "texts") continue;
-    const clip = seg.clip || {}, kf = kfValueAt(seg, tUs - seg.target_timerange.start);
+    const kf = kfValueAt(seg, tUs - seg.target_timerange.start);
+    const slide = slideOffsetAt(seg, tUs);
     ctx.save();
-    ctx.globalAlpha = (clip.alpha ?? 1) * fadeFactor(seg, tUs);
+    ctx.globalAlpha = Math.max(0, Math.min(1, kf.alpha)) * fadeFactor(seg, tUs);
     ctx.font = `600 ${((mat.size || 72) * kf.scale) | 0}px "Microsoft YaHei", sans-serif`;
     ctx.fillStyle = mat.color || "#FFFFFF";
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 8;
-    ctx.fillText(mat.content || "", W / 2 + kf.x, H / 2 + kf.y);
+    ctx.fillText(mat.content || "", W / 2 + kf.x + slide.x, H / 2 + kf.y + slide.y);
     ctx.restore();
   }
   $("#timeLabel").textContent = `${usToStr(tUs)} / ${usToStr(projectDuration())}`;
@@ -848,7 +894,10 @@ $("#btnPlay").onclick = () => (state.playing ? pause() : play());
 $("#btnSplit").onclick = splitAtPlayhead;
 $("#btnDelete").onclick = deleteSel;
 $("#btnRippleDel").onclick = rippleDeleteSel;
-$("#btnTransition").onclick = () => addTransition();
+$("#btnTransition").onclick = () => {
+  const dur = (parseFloat($("#trDur").value) || 0.5) * US;
+  addTransition(dur, $("#trType").value);
+};
 $("#btnUnTransition").onclick = () => removeTransition();
 $("#btnKf").onclick = keyframeHere;
 $("#btnGroup").onclick = groupSelected;

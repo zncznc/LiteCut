@@ -9,11 +9,55 @@
     "subtest": "node subtest.js",
     "asrtest": "node asrtest.js",
     "exptest": "node exptest.js",
-    "smoke": "electron smoke.js"
+    "smoke": "electron smoke.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "comments": {
+    "packaging": "打包：npm run dist（需先 npm i -D electron-builder）。whisper 二进制与模型（约 535MB）刻意不进包，打包版里语音识别会显示『缺 whisper』并置灰，其它功能不受影响；把 tools/whisper 放到安装目录(或源码目录)即可启用。"
+  },
+  "build": {
+    "appId": "com.zncznc.litecut",
+    "productName": "LiteCut",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "ipc.js",
+      "preload.js",
+      "tools.js",
+      "exporter.js",
+      "asr.js",
+      "subtitle.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LiteCut 轻剪"
+    }
   },
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^33.2.0"
+    "electron": "^33.2.0",
+    "electron-builder": "^26.15.3"
   }
 }

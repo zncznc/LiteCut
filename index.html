@@ -91,9 +91,16 @@
       <button id="btnSplit" class="btn small" title="在播放头处分割 (S)">✂ 分割</button>
       <button id="btnDelete" class="btn small" title="删除选中片段（留空）(Del)">🗑 删除</button>
       <button id="btnRippleDel" class="btn small" title="波纹删除：删掉并把同轨后续片段左移 (Shift+Del)">⇤ 波纹删除</button>
-      <button id="btnTransition" class="btn small" title="给选中片段与其后一片段加 0.5s 溶解转场">⇄ 转场</button>
-      <button id="btnUnTransition" class="btn small" title="去掉选中片段的转场并还原重叠">⇄✕ 去转场</button>
-      <button id="btnKf" class="btn small" title="在播放头处记录关键帧（位置/缩放）">◆ 关键帧</button>
+      <button id="btnTransition" class="btn small" title="给选中片段与其后一片段加转场（类型与时长见右侧两项）">⇄ 转场</button>
+      <select id="trType" class="trsel" title="转场类型">
+        <option value="dissolve">叠化</option>
+        <option value="fadeblack">黑场</option>
+        <option value="slideleft">左滑</option>
+        <option value="slideup">上滑</option>
+      </select>
+      <input id="trDur" class="trdur" type="number" value="0.5" min="0.1" max="3" step="0.1" title="转场时长（秒）" />
+      <button id="btnUnTransition" class="btn small" title="去掉选中片段的转场并还原重叠/淡入淡出">⇄✕ 去转场</button>
+      <button id="btnKf" class="btn small" title="在播放头处记录关键帧（位置/缩放/旋转/不透明度）">◆ 关键帧</button>
       <button id="btnGroup" class="btn small" title="把 Ctrl/Shift 多选的片段成组">⧉ 成组</button>
       <button id="btnUngroup" class="btn small" title="把选中片段的组关系解除">⧉✕ 解组</button>
       <button id="btnAddVideoTrack" class="btn small">+ 画中画轨</button>

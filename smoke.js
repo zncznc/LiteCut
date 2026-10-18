@@ -312,6 +312,81 @@ app.whenReady().then(async () => {
     check("关键帧：两点插值落在中间", adv2.kfCount === 2 && adv2.midScale > 0.65 && adv2.midScale < 0.75, JSON.stringify({ n: adv2.kfCount, mid: adv2.midScale }));
     check("属性面板关键帧按钮+列表", adv2.hasKfRow === true && adv2.kfRows === 2, "行数 " + adv2.kfRows);
 
+    // 4.7) 转场类型 / 旋转与不透明度关键帧（界面级）
+    const adv3 = await win.webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const US = 1e6;
+      const avg = (x, y, w, h) => {
+        const d = document.querySelector("#preview").getContext("2d").getImageData(x, y, w, h).data;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+        return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+      };
+      const clipOf = (id, mid, start, dur, scale) => ({ id, material_id: mid, visible: true, speed: 1, volume: 1,
+        target_timerange: { start, duration: dur }, source_timerange: { start: 0, duration: dur },
+        clip: { alpha: 1, scale: { x: scale, y: scale }, transform: { x: 0, y: 0 }, rotation: 0 } });
+      state.project.tracks = [{ id: "tk-v", type: "video", name: "主轨",
+        segments: [clipOf("s1", "mv-red", 0, 2 * US, 1), clipOf("s2", "mv-blue", 2 * US, 2 * US, 1)] }];
+      state.sel = null; state.multi = [];
+      renderAll(); await wait(700);
+
+      const opts = [...document.querySelectorAll("#trType option")].map((o) => o.value);
+      const byId = (id) => state.project.tracks[0].segments.find((s) => s.id === id);
+
+      // (a) 左滑转场：位移轴=x，且不动 alpha
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      document.querySelector("#trType").value = "slideleft";
+      document.querySelector("#trDur").value = "0.5";
+      document.querySelector("#btnTransition").click(); await wait(150);
+      const slideAxis = byId("s2").slide && byId("s2").slide.axis;
+      const slideFade = byId("s2").fade?.in || 0;
+      const trType = byId("s1").transition && byId("s1").transition.type;
+      const midT = byId("s2").target_timerange.start + 0.25 * US;
+      setPlayhead(midT); await wait(700); drawFrame(midT);
+      const leftPx = avg(120, 500, 600, 200), rightPx = avg(1200, 500, 600, 200);
+
+      // (b) 去转场 → 重叠与位移都还原
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      document.querySelector("#btnUnTransition").click(); await wait(150);
+      const restoredStart = byId("s2").target_timerange.start / US;
+      const restoredSlide = byId("s2").slide;
+
+      // (c) 黑场转场：前者淡出 + 后者淡入
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      document.querySelector("#trType").value = "fadeblack";
+      document.querySelector("#btnTransition").click(); await wait(150);
+      const blackOut = (byId("s1").fade?.out || 0) / US, blackIn = (byId("s2").fade?.in || 0) / US;
+      const bt = byId("s1").transition && byId("s1").transition.type;
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      document.querySelector("#btnUnTransition").click(); await wait(120);
+
+      // (d) 关键帧写入旋转/不透明度，并在面板显示
+      const seg = byId("s1");
+      state.sel = { trackId: "tk-v", segId: "s1" }; state.multi = [];
+      setPlayhead(0);
+      kfWrite(seg, "x", 0); kfWrite(seg, "rotation", 0); kfWrite(seg, "alpha", 1);
+      setPlayhead(2 * US - 1);
+      kfWrite(seg, "rotation", 90); kfWrite(seg, "alpha", 0.15);
+      renderAll(); await wait(250);
+      const mid = kfValueAt(seg, 1 * US);
+      const kfFields = Object.keys(seg.keyframes[0]);
+      setPlayhead(1 * US); await wait(700); drawFrame(1 * US);
+      const midPx = avg(700, 400, 500, 260);
+      const panelHasKf = !!document.querySelector("#propBody .kflist");
+
+      return { opts, slideAxis, slideFade, trType, leftPx, rightPx, restoredStart, restoredSlide,
+               blackOut, blackIn, bt, rotMid: mid.rotation, alphaMid: mid.alpha, kfFields, midPx, panelHasKf };
+    })()`);
+    check("转场类型下拉有 4 种", JSON.stringify(adv3.opts) === JSON.stringify(["dissolve", "fadeblack", "slideleft", "slideup"]), JSON.stringify(adv3.opts));
+    check("左滑转场：位移轴=x 且不动 alpha", adv3.slideAxis === "x" && adv3.slideFade === 0 && adv3.trType === "slideleft", JSON.stringify([adv3.slideAxis, adv3.slideFade, adv3.trType]));
+    check("预览滑动中点：左红右蓝", !!adv3.leftPx && !!adv3.rightPx && adv3.leftPx[0] > adv3.leftPx[2] + 40 && adv3.rightPx[2] > adv3.rightPx[0] + 40, JSON.stringify([adv3.leftPx, adv3.rightPx]));
+    check("去转场后重叠与位移都还原", Math.abs(adv3.restoredStart - 2) < 0.001 && !adv3.restoredSlide, JSON.stringify([adv3.restoredStart, adv3.restoredSlide]));
+    check("黑场转场：前者淡出 0.5s + 后者淡入 0.5s", adv3.bt === "fadeblack" && Math.abs(adv3.blackOut - 0.5) < 0.02 && Math.abs(adv3.blackIn - 0.5) < 0.02, JSON.stringify([adv3.blackOut, adv3.blackIn, adv3.bt]));
+    check("关键帧记录含 rotation/alpha 字段", adv3.kfFields.includes("rotation") && adv3.kfFields.includes("alpha"), JSON.stringify(adv3.kfFields));
+    check("关键帧插值：旋转≈45° 透明度≈0.575", Math.abs(adv3.rotMid - 45) < 4 && Math.abs(adv3.alphaMid - 0.575) < 0.05, JSON.stringify([adv3.rotMid, adv3.alphaMid]));
+    check("预览按不透明度关键帧变暗", adv3.midPx[0] > 40 && adv3.midPx[0] < 170, JSON.stringify(adv3.midPx));
+    check("属性面板显示关键帧列表", adv3.panelHasKf === true);
+
     // 5) 截图（顺带验证不是黑屏）
     const img = await win.webContents.capturePage();
     fs.writeFileSync(SHOT, img.toPNG());

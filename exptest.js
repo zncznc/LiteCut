@@ -262,5 +262,121 @@ console.log("== 9) T8 关键帧（缩放+位移）==");
   check("右移后右侧仍有画面", !!rightLate && rightLate[0] > 100, JSON.stringify(rightLate));
 }
 
+/* ---------- T9 转场：黑场（中点最暗，不是交叉溶解） ---------- */
+console.log("== 10) T9 转场：黑场 ==");
+{
+  const p = mkProject([{ id: "tk-v", type: "video", name: "主轨", segments: [
+    { ...segVideo("s1", "v1", 0, 2 * US), fade: { in: 0, out: 0.5 * US } },
+    { ...segVideo("s2", "v2", 1.5 * US, 2 * US), fade: { in: 0.5 * US, out: 0 } },
+  ] }]);
+  p.materials = {
+    videos: [matVideo("v1", RED, "red.mp4", 640, 360), matVideo("v2", BLUE, "blue.mp4", 1280, 720)],
+    audios: [], texts: [],
+  };
+  const out = path.join(W, "fadeblack.mp4");
+  const c = buildExport(p, out);
+  sh(c.args, "导出（黑场）");
+  const before = avgRGB(out, 1.2), mid = avgRGB(out, 1.75), after = avgRGB(out, 2.4);
+  const sum = (v) => (v ? v[0] + v[1] + v[2] : -1);
+  console.log("   1.2s %s → 1.75s(中点) %s → 2.4s %s", before, mid, after);
+  check("黑场两端仍然亮", !!before && sum(before) > 200 && !!after && sum(after) > 200, JSON.stringify([before, after]));
+  check("黑场中点明显更暗（≠交叉溶解）", sum(mid) > 0 && sum(mid) < 205, "sum=" + sum(mid));
+}
+
+/* ---------- T10 转场：左滑（位移滑入，不是淡化） ---------- */
+console.log("== 11) T10 转场：左滑 ==");
+{
+  const p = mkProject([{ id: "tk-v", type: "video", name: "主轨", segments: [
+    segVideo("s1", "v1", 0, 2 * US),
+    { ...segVideo("s2", "v2", 1.5 * US, 2 * US), slide: { axis: "x", duration: 0.5 * US } },
+  ] }]);
+  p.materials = {
+    videos: [matVideo("v1", RED, "red.mp4", 640, 360), matVideo("v2", BLUE, "blue.mp4", 1280, 720)],
+    audios: [], texts: [],
+  };
+  const out = path.join(W, "slideleft.mp4");
+  const c = buildExport(p, out);
+  sh(c.args, "导出（左滑）");
+  const left = avgRGB(out, 1.75, { w: 800, h: 600, x: 40, y: 240 });
+  const right = avgRGB(out, 1.75, { w: 800, h: 600, x: 1080, y: 240 });
+  const mid = avgRGB(out, 1.95), after = avgRGB(out, 2.4);
+  console.log("   滑动中点：左 %s / 右 %s ｜ 1.95s %s ｜ 2.4s %s", left, right, mid, after);
+  check("滑动中点：左半仍是前段（红）", !!left && left[0] > 120 && left[2] < 80, JSON.stringify(left));
+  check("滑动中点：右半是后段（蓝）", !!right && right[2] > 120 && right[0] < 80, JSON.stringify(right));
+  check("滑完之后满幅为蓝", !!after && after[2] > 150 && after[0] < 60, JSON.stringify(after));
+}
+
+/* ---------- T11 旋转关键帧：角度真的在转 ---------- */
+console.log("== 12) T11 旋转关键帧 ==");
+{
+  const seg = {
+    ...segVideo("s1", "v1", 0, 2 * US, {}, {
+      keyframes: [{ t: 0, x: 0, y: 0, scale: 1, rotation: 0 },
+        { t: 2 * US, x: 0, y: 0, scale: 1, rotation: 180 }],
+    }),
+  };
+  const p = mkProject([{ id: "tk-v", type: "video", name: "主轨", segments: [seg] }]);
+  p.materials = { videos: [matVideo("v1", SPLIT, "split.mp4", 640, 360)], audios: [], texts: [] };
+  const out = path.join(W, "rotkf.mp4");
+  const c = buildExport(p, out);
+  console.log("   滤镜含 rotate 表达式:", /rotate='/.test(c.filter), "| keyframed =", c.summary.keyframed);
+  sh(c.args, "导出（旋转关键帧）");
+  const L0 = avgRGB(out, 0.1, { w: 900, h: 1000, x: 0, y: 40 });
+  const R0 = avgRGB(out, 0.1, { w: 900, h: 1000, x: 1020, y: 40 });
+  const T1 = avgRGB(out, 1.0, { w: 1800, h: 500, x: 60, y: 0 });
+  const B1 = avgRGB(out, 1.0, { w: 1800, h: 500, x: 60, y: 580 });
+  const L19 = avgRGB(out, 1.9, { w: 900, h: 1000, x: 0, y: 40 });
+  const R19 = avgRGB(out, 1.9, { w: 900, h: 1000, x: 1020, y: 40 });
+  console.log("   0.1s 左 %s 右 %s ｜ 1.0s 上 %s 下 %s ｜ 1.9s 左 %s 右 %s", L0, R0, T1, B1, L19, R19);
+  check("旋转关键帧进了滤镜链", /rotate='/.test(c.filter));
+  check("起点：竖切（左蓝右红）", !!L0 && !!R0 && L0[2] > L0[0] + 40 && R0[0] > R0[2] + 40, JSON.stringify([L0, R0]));
+  // 判据用上/下：转到 90° 时竖切变横切（原来的左蓝转到上方）。
+  // 不能用"左右相等"来判 —— 90° 时旋转后的画面比画布窄，左右区域各自被裁掉的黑边不同，本来就不相等。
+  check("转到 90°：竖切变横切（上蓝下红）", !!T1 && !!B1 && T1[2] > T1[0] + 40 && B1[0] > B1[2] + 40, JSON.stringify([T1, B1]));
+  check("转到 ~180°：竖切翻过来（左红右蓝）", !!L19 && !!R19 && L19[0] > L19[2] + 60 && R19[2] > R19[0] + 60, JSON.stringify([L19, R19]));
+}
+
+/* ---------- T12 不透明度关键帧（geq 逐帧 alpha） ---------- */
+console.log("== 13) T12 不透明度关键帧 ==");
+{
+  const seg = {
+    ...segVideo("s1", "v1", 0, 2 * US, {}, {
+      keyframes: [{ t: 0, x: 0, y: 0, scale: 1, alpha: 1 },
+        { t: 2 * US, x: 0, y: 0, scale: 1, alpha: 0 }],
+    }),
+  };
+  const p = mkProject([{ id: "tk-v", type: "video", name: "主轨", segments: [seg] }]);
+  p.materials = { videos: [matVideo("v1", RED, "red.mp4", 640, 360)], audios: [], texts: [] };
+  const out = path.join(W, "alphakf.mp4");
+  const t0 = Date.now();
+  const c = buildExport(p, out);
+  console.log("   滤镜含 geq:", /geq=/.test(c.filter), "| alphaKf =", c.summary.alphaKf);
+  sh(c.args, "导出（不透明度关键帧）");
+  const enc = ((Date.now() - t0) / 1000).toFixed(1);
+  const a01 = avgRGB(out, 0.1), a10 = avgRGB(out, 1.0), a19 = avgRGB(out, 1.9);
+  console.log("   0.1s %s → 1.0s %s → 1.9s %s ｜ 编码耗时 %ss（geq 逐帧求值，比常规慢）", a01, a10, a19, enc);
+  check("alpha 关键帧走 geq", /geq=/.test(c.filter) && c.summary.alphaKf === 1);
+  check("起点不透明（红）", !!a01 && a01[0] > 200, JSON.stringify(a01));
+  check("中点约半透明", !!a10 && a10[0] > 60 && a10[0] < 190, JSON.stringify(a10));
+  check("末点接近全透明（黑）", !!a19 && a19[0] < 45, JSON.stringify(a19));
+}
+
+/* ---------- T13 字幕淡入的时基：片段不从 0 秒开始时不能错位 ---------- */
+console.log("== 14) T13 字幕淡入（片段起点 3s） ==");
+{
+  const p = mkProject([{ id: "tk-t", type: "text", name: "文字", segments: [
+    { id: "s1", material_id: "t1", visible: true, fade: { in: 1 * US, out: 0 },
+      target_timerange: { start: 3 * US, duration: 2 * US }, source_timerange: { start: 0, duration: 2 * US },
+      clip: { alpha: 1, scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0 } }] }]);
+  p.materials = { videos: [], audios: [], texts: [{ id: "t1", content: "时基校验", size: 140, color: "#FFFFFF" }] };
+  const out = path.join(W, "textfade_late.mp4");
+  const c = buildExport(p, out);
+  sh(c.args, "导出（字幕淡入·晚起点）");
+  const early = brightPixels(out, 3.1, 1400, 300, 260, 390);
+  const late = brightPixels(out, 4.0, 1400, 300, 260, 390);
+  console.log("   亮像素 t=3.1s（淡入 10%%）: %d | t=4.0s（淡入完成）: %d", early, late);
+  check("字幕淡入按绝对时间：3.1s 基本没字", early >= 0 && late > 200 && early < late / 3, `${early} → ${late}`);
+}
+
 console.log("\n== 结果: %d 通过 / %d 失败 ==", pass, fail);
 process.exit(fail ? 1 : 0);
