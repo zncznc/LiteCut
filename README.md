@@ -295,3 +295,4 @@ export ELECTRON_MIRROR="https://registry.npmmirror.com/-/binary/electron/"
 或改成 `extraResources` 打进包内——代价是安装包体积 +535MB，所以默认没做。
 
 MIT License.
+<!-- entire agent review trigger -->
