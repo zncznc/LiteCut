@@ -6,10 +6,13 @@ const $ = (s) => document.querySelector(s);
 const state = {
   project: null,
   media: [],            // 素材库（未上轨道的导入项）
-  sel: null,            // { trackId, segId }
+  sel: null,            // { trackId, segId } —— 主选中
+  multi: [],            // 多选集合 [{ trackId, segId }]，空=只认主选中
   playhead: 0,          // 微秒
   playing: false,
   pxPerSec: 120,
+  snap: true,           // 磁吸：候选边来自所有轨道，可关
+  ripple: false,        // 波纹插入：插入素材时把该时刻之后的片段整体右移
   undo: [], redo: [],
   info: null,
   exportUs: 0,
@@ -107,7 +110,7 @@ function renderMedia() {
     d.innerHTML = `<div class="ico">${ico}</div>
       <div style="min-width:0"><div class="nm">${escapeHtml(m.name)}</div>
       <div class="mt">${m.kind === "image" ? "图片" : usToStr(m.duration)}${m.width ? " · " + m.width + "×" + m.height : ""}</div></div>`;
-    d.ondblclick = () => addToTrackBest(m, 0);
+    d.ondblclick = () => addToTrackBest(m, null);   // 双击=追加到该轨道末尾
     d.ondragstart = (e) => e.dataTransfer.setData("text/lc-material", m.id);
     box.appendChild(d);
   }
@@ -115,17 +118,18 @@ function renderMedia() {
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 /* 把素材加到合适轨道 */
-function addToTrackBest(mat, startUs) {
+function addToTrackBest(mat, startUs, trackHint) {
   snapshot();
   const lane = mat.kind === "video" || mat.kind === "image" ? "video"
     : mat.kind === "audio" ? "audio" : "text";
-  let track = state.project.tracks.find((t) => t.type === lane)
+  let track = (trackHint && trackHint.type === lane ? trackHint : null)
+    || state.project.tracks.find((t) => t.type === lane)
     || state.project.tracks.find((t) => t.type === "video");
   if (!track) { track = { id: nextId("tk"), type: "video", name: "主轨", segments: [] }; state.project.tracks.unshift(track); }
   const dur = mat.duration || 5 * US;
   const seg = {
     id: nextId("s"), material_id: mat.id, visible: true, speed: 1, volume: 1,
-    target_timerange: T(startUs || freeStartOn(track, dur), dur),
+    target_timerange: T(startUs == null ? freeStartOn(track, dur) : Math.max(0, startUs), dur),
     source_timerange: T(0, dur),
     clip: { alpha: 1, scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0 },
   };
@@ -138,6 +142,21 @@ function freeStartOn(track, dur) {
   let end = 0;
   for (const s of track.segments) end = Math.max(end, s.target_timerange.start + s.target_timerange.duration);
   return end;
+}
+
+/** 插入素材到指定轨道：波纹插入开启时，先把该时刻之后的片段整体右移，避免覆盖。
+ *  （关闭时行为与以前一致：直接落在该位置，允许重叠。） */
+function insertMaterial(mat, track, atUs) {
+  const d = mat.duration || 5 * US;
+  const at = Math.max(0, Math.round(atUs));
+  if (track && state.ripple) {
+    let moved = 0;
+    for (const s of track.segments) {
+      if (s.target_timerange.start >= at) { s.target_timerange.start += d; moved++; }
+    }
+    if (moved) setStatus(`波纹插入：其后 ${moved} 个片段右移 ${(d / US).toFixed(2)}s`);
+  }
+  return addToTrackBest(mat, at, track);
 }
 
 /* 新增文字 */
@@ -188,14 +207,28 @@ function renderTimeline() {
   box.innerHTML = "";
   for (const track of trackOrder()) {
     const row = document.createElement("div");
-    row.className = "track";
+    row.className = "track" + (trackHidden(track) ? " off" : track.muted === true ? " off" : "");
     row.dataset.tid = track.id;
     const th = document.createElement("div");
     th.className = "thead";
-    th.innerHTML = `${track.type === "video" ? "🎬" : track.type === "audio" ? "🎵" : "🅣"} ${escapeHtml(track.name || track.type)}`;
+    const vis = track.visible !== false, mut = track.muted === true;
+    th.innerHTML =
+      `<span class="tname">${track.type === "video" ? "🎬" : track.type === "audio" ? "🎵" : "🅣"} ${escapeHtml(track.name || track.type)}</span>` +
+      `<button class="tbtn" data-act="vis" title="${vis ? "隐藏该轨（画面与声音都不出）" : "显示该轨"}">${vis ? "👁" : "🚫"}</button>` +
+      (track.type === "text" ? "" : `<button class="tbtn" data-act="mut" title="${mut ? "取消静音" : "静音该轨"}">${mut ? "🔇" : "🔊"}</button>`);
+    th.querySelectorAll(".tbtn").forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        snapshot();
+        if (b.dataset.act === "vis") track.visible = track.visible !== false ? false : true;
+        else track.muted = track.muted !== true;
+        renderAll();
+        setStatus(`${track.name || track.type}：画面${track.visible === false ? "已隐藏" : "显示中"} · 声音${track.muted === true ? "已静音" : "正常"}`);
+      };
+    });
     const lane = document.createElement("div");
     lane.className = "tlane";
-    lane.style.width = width - 96 + "px";
+    lane.style.width = width - 124 + "px";
     lane.dataset.tid = track.id;
     lane.onpointerdown = (e) => {
       if (e.target !== lane) return;
@@ -210,16 +243,18 @@ function renderTimeline() {
       const rect = lane.getBoundingClientRect();
       const us = pxToUs(e.clientX - rect.left + lane.scrollLeft);
       const mat = materialOf(mid);
-      if (mat) addToTrackBest(mat, Math.max(0, us));
+      if (mat) insertMaterial(mat, track, Math.max(0, us));
     };
     for (const seg of track.segments) {
       const mat = materialOf(seg.material_id);
       const el = document.createElement("div");
       el.className = "clip" + (track.type === "audio" ? " audio" : track.type === "text" ? " text" : "");
-      if (state.sel && state.sel.segId === seg.id) el.classList.add("sel");
+      const badge = seg.transition ? "⇄ " : seg.group_id ? "⧉ " : "";
+      const isSel = (state.sel && state.sel.segId === seg.id) || state.multi.some((m) => m.segId === seg.id);
+      if (isSel) el.classList.add("sel");
       el.style.left = px(seg.target_timerange.start) + "px";
       el.style.width = Math.max(14, px(seg.target_timerange.duration)) + "px";
-      el.innerHTML = `<div class="hdl l"></div><div class="lbl">${escapeHtml(mat ? (mat.name || mat.content || "") : "?")}</div><div class="hdl r"></div>`;
+      el.innerHTML = `<div class="hdl l"></div><div class="lbl">${badge}${escapeHtml(mat ? (mat.name || mat.content || "") : "?")}</div><div class="hdl r"></div>`;
       el.dataset.tid = track.id; el.dataset.sid = seg.id;
       el.onpointerdown = (e) => startClipDrag(e, track.id, seg.id, el);
       lane.appendChild(el);
@@ -232,51 +267,203 @@ function renderTimeline() {
 }
 const pxToUs = (x) => (x / state.pxPerSec) * US;
 
+/* ============ 选择（单选 / 多选 / 成组） ============ */
+/** 当前选中的片段列表（含主选中；多选为空时就是主选中一个） */
+function selList() {
+  const list = state.multi.length ? state.multi : (state.sel ? [state.sel] : []);
+  const seen = new Set(), out = [];
+  for (const s of list) {
+    if (!s || seen.has(s.segId)) continue;
+    seen.add(s.segId);
+    const hit = findSeg(s.trackId, s.segId);
+    if (hit && hit.seg) out.push({ trackId: hit.track.id, track: hit.track, seg: hit.seg });
+  }
+  return out;
+}
+/** mode: "set" 单选 | "toggle" 加减选（Ctrl/Shift）| "group" 选中整组 */
+function setSelection(trackId, segId, mode = "set") {
+  const hit = findSeg(trackId, segId);
+  if (!hit || !hit.seg) return;
+  const seg = hit.seg;
+  if (mode === "toggle") {
+    // 第一次加选时把当前主选中也带进多选集合（符合"Ctrl+点选=在原选择上追加"的直觉）
+    if (!state.multi.length && state.sel && state.sel.segId !== segId) state.multi.push({ ...state.sel });
+    const i = state.multi.findIndex((x) => x.segId === segId);
+    if (i >= 0) state.multi.splice(i, 1);
+    else state.multi.push({ trackId, segId });
+    if (!state.multi.length) { state.multi = []; state.sel = { trackId, segId }; }
+    else state.sel = state.multi[state.multi.length - 1];
+  } else if (mode === "group" && seg.group_id) {
+    state.multi = [];
+    for (const t of state.project.tracks) {
+      for (const s of t.segments) if (s.group_id === seg.group_id) state.multi.push({ trackId: t.id, segId: s.id });
+    }
+    state.sel = { trackId, segId };
+  } else {
+    state.multi = [];
+    state.sel = { trackId, segId };
+  }
+}
+
+/* ============ 成组 / 解组 ============ */
+function groupSelected() {
+  const sel = selList();
+  if (sel.length < 2) return setStatus("成组需要先选中至少两个片段（Ctrl/Shift 点选）");
+  snapshot();
+  const gid = nextId("g");
+  for (const { seg } of sel) seg.group_id = gid;
+  renderAll();
+  setStatus(`已把 ${sel.length} 个片段成组`);
+}
+function ungroupSelected() {
+  const sel = selList().filter((x) => x.seg.group_id);
+  if (!sel.length) return setStatus("选中的片段不属于任何组");
+  snapshot();
+  for (const { seg } of sel) delete seg.group_id;
+  renderAll();
+  setStatus(`已解组 ${sel.length} 个片段`);
+}
+
+/* ============ 片段间转场（溶解） ============
+   做法：把后一个片段左移 D 与前者重叠，**只让上层片段头部淡入 D**（前者保持不透明）。
+   叠在上层的 B 以 alpha=a 覆盖不透明的 A，得到 out = a*B + (1-a)*A —— 这正是交叉溶解。
+   若改成"前者也淡出"，前半段会同时向黑底淡出、中途亮度掉一截（淡经黑底），那是错的做法。
+   预览与导出共用同一套 fade 语义，不需要额外的 xfade 滤镜。 */
+function addTransition(durUs = 5e5, type = "dissolve") {
+  const sel = selList();
+  if (sel.length !== 1) return setStatus("转场需要先选中一个片段（单选）");
+  const { track, seg } = sel[0];
+  if (seg.transition) removeTransition();          // 重复点=按新类型/时长重来
+  const sorted = [...track.segments].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  const i = sorted.findIndex((s) => s.id === seg.id);
+  const next = sorted[i + 1];
+  if (!next) return setStatus("这个片段后面没有相邻片段，无法加转场");
+  const D = Math.min(durUs, Math.floor(seg.target_timerange.duration / 3), Math.floor(next.target_timerange.duration / 3));
+  if (D < 1e5) return setStatus("片段太短，转场至少需要 0.1s");
+  snapshot();
+  // 记下受影响的原值，去掉转场时原样还回去（不吞掉用户自己设的淡入淡出）
+  const prev = {
+    segFadeOut: seg.fade?.out || 0, nextFadeIn: next.fade?.in || 0, nextSlide: next.slide || null,
+    segAFadeOut: seg.fade?.aout || 0, nextAFadeIn: next.fade?.ain || 0,
+  };
+  next.target_timerange.start = Math.max(0, next.target_timerange.start - D);
+  next.fade = { in: next.fade?.in || 0, out: next.fade?.out || 0, ain: next.fade?.ain || 0, aout: next.fade?.aout || 0 };
+  next.slide = null;
+  // 音频交叉淡化：转场的重叠区间里前段音频淡出、后段音频淡入（与画面同口径，两侧一致）
+  seg.fade = { ...(seg.fade || {}), in: seg.fade?.in || 0, out: seg.fade?.out || 0, ain: seg.fade?.ain || 0, aout: D };
+  next.fade.ain = D;
+  if (type === "fadeblack") {
+    // 前者淡出到黑 + 后者淡入：中点最暗，是"黑场"而不是溶解
+    next.fade.in = D;
+    seg.fade = { in: seg.fade?.in || 0, out: D };
+  } else if (type === "slideleft" || type === "slideup") {
+    next.slide = { axis: type === "slideup" ? "y" : "x", duration: D };   // 滑入靠位移表达式，不动 alpha
+  } else {
+    next.fade.in = D;                              // 叠化：只动上层，前者不淡出
+    type = "dissolve";
+  }
+  seg.transition = { type, duration: D, next_id: next.id, prev };
+  track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  renderAll();
+  const NAMES = { dissolve: "叠化", fadeblack: "黑场", slideleft: "左滑", slideup: "上滑" };
+  setStatus(`已加${NAMES[type] || "叠化"}转场 ${(D / US).toFixed(2)}s（后一片段左移重叠）`);
+}
+function removeTransition() {
+  const sel = selList();
+  if (sel.length !== 1) return setStatus("先选中带转场的片段");
+  const { track, seg } = sel[0];
+  if (!seg.transition) return setStatus("这个片段没有转场");
+  const D = seg.transition.duration;
+  const saved = seg.transition.prev || {};
+  const sorted = [...track.segments].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  const next = (seg.transition.next_id && track.segments.find((s) => s.id === seg.transition.next_id))
+    || sorted[sorted.findIndex((s) => s.id === seg.id) + 1];
+  snapshot();
+  if (next) {
+    next.target_timerange.start += D;                // 把重叠还回去
+    if (next.fade) next.fade.in = saved.nextFadeIn || 0;
+    if (next.fade) next.fade.ain = saved.nextAFadeIn || 0;
+    next.slide = saved.nextSlide || null;
+  }
+  seg.fade = { ...(seg.fade || {}), in: seg.fade?.in || 0, out: saved.segFadeOut || 0, aout: saved.segAFadeOut || 0 };
+  delete seg.transition;
+  track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  renderAll();
+  setStatus("已去掉转场（重叠与淡入淡出都已还原）");
+}
+
 /* 片段拖动 / 修剪 */
+/** 磁吸候选边：所有轨道的片段首尾 + 0 + 播放头（排除指定片段）。
+ *  独立成函数是为了能直接测：跨轨吸附是否真的生效、关掉磁吸后是否只剩 0/播放头。 */
+function snapCandidates(excludeIds) {
+  const ex = excludeIds instanceof Set ? excludeIds : new Set(excludeIds || []);
+  const cands = [0, state.playhead];
+  if (state.snap === false) return cands;
+  for (const t of state.project.tracks) {
+    for (const s of t.segments) {
+      if (ex.has(s.id)) continue;
+      cands.push(s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration);
+    }
+  }
+  return cands;
+}
 function startClipDrag(e, trackId, segId, el) {
   e.stopPropagation();
   const hit = findSeg(trackId, segId);
-  if (!hit) return;
-  state.sel = { trackId, segId };
+  if (!hit || !hit.seg) return;
+  // 点击时的选择语义：Ctrl/Shift 加减选；成组片段一点选整组；否则单选
+  const multiKey = e.ctrlKey || e.metaKey || e.shiftKey;
+  setSelection(trackId, segId, multiKey ? "toggle" : (hit.seg.group_id ? "group" : "set"));
   renderProps(); renderTimeline();
+
   const isL = e.target.classList.contains("l"), isR = e.target.classList.contains("r");
-  const mode = isL ? "trimL" : isR ? "trimR" : "move";
+  const sel = selList();
+  // 多选时不做边缘裁剪（避免同时改多个片段的源范围），只整体移动
+  const mode = (sel.length > 1 && (isL || isR)) ? "move" : (isL ? "trimL" : isR ? "trimR" : "move");
   const x0 = e.clientX;
-  const orig = JSON.parse(JSON.stringify(hit.seg));
-  const others = hit.track.segments.filter((s) => s.id !== segId)
-    .flatMap((s) => [s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration]);
+  const orig = sel.map((s) => ({ ref: s, o: JSON.parse(JSON.stringify(s.seg)) }));
+  const primary = orig.find((x) => x.ref.seg.id === segId) || orig[0];
+  // 整轨磁吸：候选边来自【所有轨道】（不只当前轨），跨轨对齐也能吸上；state.snap=false 时只剩 0 与播放头
+  const selectedIds = new Set(orig.map((x) => x.ref.seg.id));
+  const cands = snapCandidates(selectedIds);
   snapshot();
   const onMove = (ev) => {
-    const dx = ev.clientX - x0;
-    let delta = pxToUs(dx);
+    const delta = pxToUs(ev.clientX - x0);
     const snap = (v) => {
-      const cands = [0, state.playhead, ...others];
       const tol = pxToUs(8);
       for (const c of cands) if (Math.abs(v - c) < tol) return c;
       return v;
     };
-    const seg = hit.seg;
     if (mode === "move") {
-      seg.target_timerange.start = Math.max(0, snap(orig.target_timerange.start + delta));
-    } else if (mode === "trimR") {
-      let d = Math.max(2e5, orig.target_timerange.duration + delta);
-      d = Math.min(d, (orig.source_timerange.duration / (seg.speed || 1)) * 1e6 ? d : d);
-      seg.target_timerange.duration = d;
-      seg.source_timerange.duration = Math.round(d * (seg.speed || 1));
-    } else if (mode === "trimL") {
-      const maxL = orig.target_timerange.duration - 2e5;
-      let shift = Math.min(Math.max(delta, -orig.target_timerange.start), maxL);
-      seg.target_timerange.start = orig.target_timerange.start + shift;
-      seg.target_timerange.duration = orig.target_timerange.duration - shift;
-      seg.source_timerange.start = Math.max(0, orig.source_timerange.start + Math.round(shift * (seg.speed || 1)));
-      seg.source_timerange.duration = Math.round(seg.target_timerange.duration * (seg.speed || 1));
+      // 先按主片段吸附，再把同一个位移施加给全部选中片段（保持相对位置）
+      const snapped = Math.max(0, snap(primary.o.target_timerange.start + delta));
+      const d = snapped - primary.o.target_timerange.start;
+      for (const { ref, o } of orig) {
+        const st = o.target_timerange.start + d;
+        ref.seg.target_timerange.start = st < 0 ? 0 : st;
+      }
+    } else {
+      const seg = hit.seg, o = orig[0].o;
+      if (mode === "trimR") {
+        const d = Math.max(2e5, o.target_timerange.duration + delta);
+        seg.target_timerange.duration = d;
+        seg.source_timerange.duration = Math.round(d * (seg.speed || 1));
+      } else {
+        const maxL = o.target_timerange.duration - 2e5;
+        const shift = Math.min(Math.max(delta, -o.target_timerange.start), maxL);
+        seg.target_timerange.start = o.target_timerange.start + shift;
+        seg.target_timerange.duration = o.target_timerange.duration - shift;
+        seg.source_timerange.start = Math.max(0, o.source_timerange.start + Math.round(shift * (seg.speed || 1)));
+        seg.source_timerange.duration = Math.round(seg.target_timerange.duration * (seg.speed || 1));
+      }
     }
     renderTimeline(); renderProps();
   };
   const onUp = () => {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
-    hit.track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+    const tracks = new Set(orig.map((x) => x.ref.track));
+    for (const t of tracks) t.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
     renderAll();
   };
   window.addEventListener("pointermove", onMove);
@@ -307,13 +494,117 @@ function splitAtPlayhead() {
 }
 
 function deleteSel() {
-  if (!state.sel) return;
-  const hit = findSeg(state.sel.trackId, state.sel.segId);
-  if (!hit) return;
+  const sel = selList();
+  if (!sel.length) return;
   snapshot();
-  hit.track.segments = hit.track.segments.filter((s) => s.id !== state.sel.segId);
-  state.sel = null;
-  renderAll(); setStatus("已删除片段");
+  for (const { track, seg } of sel) track.segments = track.segments.filter((s) => s.id !== seg.id);
+  state.sel = null; state.multi = [];
+  renderAll();
+  setStatus(`已删除 ${sel.length} 个片段（留空）`);
+}
+
+/* 波纹删除：删掉选中的片段，并把同轨其后片段整体左移，补上腾出的时长。
+   多选时按起点从后往前逐个处理，避免前一次左移影响后面的判断。 */
+function rippleDeleteSel() {
+  let sel = selList();
+  if (!sel.length) return setStatus("先选中片段");
+  snapshot();
+  sel = [...sel].sort((a, b) => b.seg.target_timerange.start - a.seg.target_timerange.start);
+  let moved = 0;
+  for (const { trackId, seg } of sel) {
+    const hit = findSeg(trackId, seg.id);
+    if (!hit || !hit.seg) continue;
+    const t = hit.track, s = hit.seg;
+    const gap = s.target_timerange.duration, from = s.target_timerange.start;
+    t.segments = t.segments.filter((x) => x.id !== s.id);
+    for (const x of t.segments) {
+      if (x.target_timerange.start >= from) { x.target_timerange.start = Math.max(0, x.target_timerange.start - gap); moved++; }
+    }
+    t.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  }
+  state.sel = null; state.multi = [];
+  renderAll();
+  setStatus(`波纹删除 ${sel.length} 个片段：同轨其后共 ${moved} 次左移`);
+}
+
+/* ============ 关键帧（位置 / 缩放） ============
+   模型：seg.keyframes = [{ t(片段内相对微秒), x, y, scale }]，线性插值。
+   导出侧用 zoompan 的 z/x/y 时间表达式实现（实测 zoompan 保留 alpha，不会用黑底盖住下层轨道）。
+   边界：旋转仍是静态属性；不透明度仍是线性淡入淡出 —— ffmpeg 没有便宜的时间可变 alpha 乘子
+   （colorchannelmixer 只支持 enable，不支持按时间的命令；geq 是逐像素求值，太慢）。 */
+function kfSorted(seg) {
+  return Array.isArray(seg.keyframes) ? [...seg.keyframes].sort((a, b) => a.t - b.t) : [];
+}
+function kfBase(seg) {
+  const clip = seg.clip || {};
+  return {
+    x: clip.transform?.x || 0, y: clip.transform?.y || 0, scale: clip.scale?.x ?? 1,
+    rotation: clip.rotation || 0, alpha: clip.alpha ?? 1,
+  };
+}
+/** 片段内相对时间 relUs 处的变换（没有关键帧就回落到静态值；缺哪个字段就回落哪个） */
+function kfValueAt(seg, relUs) {
+  const k = kfSorted(seg), base = kfBase(seg);
+  const norm = (o) => ({
+    x: o.x ?? base.x, y: o.y ?? base.y, scale: o.scale ?? base.scale,
+    rotation: o.rotation ?? base.rotation, alpha: o.alpha ?? base.alpha,
+  });
+  if (!k.length) return base;
+  if (relUs <= k[0].t) return norm(k[0]);
+  const last = k[k.length - 1];
+  if (relUs >= last.t) return norm(last);
+  for (let i = 1; i < k.length; i++) {
+    if (relUs <= k[i].t) {
+      const a = k[i - 1], b = k[i], f = (relUs - a.t) / Math.max(1, b.t - a.t);
+      const L = (p, q) => p + (q - p) * f;
+      const A = norm(a), B = norm(b);
+      return {
+        x: L(A.x, B.x), y: L(A.y, B.y), scale: L(A.scale, B.scale),
+        rotation: L(A.rotation, B.rotation), alpha: L(A.alpha, B.alpha),
+      };
+    }
+  }
+  return base;
+}
+/** 滑动类转场在 tUs 时刻的位移（与导出侧 overlay 的 ramp 同一公式） */
+function slideOffsetAt(seg, tUs) {
+  const sl = seg && seg.slide;
+  if (!sl || !sl.duration) return { x: 0, y: 0 };
+  const tt = seg.target_timerange;
+  const ramp = Math.max(0, Math.min(1, (tUs - tt.start) / sl.duration));
+  const { width: W, height: H } = state.project.canvas_config;
+  const left = 1 - ramp;
+  return sl.axis === "y" ? { x: 0, y: left * H } : { x: left * W, y: 0 };
+}
+/** 把某个字段写进"播放头所在时刻"的关键帧（不存在则新建；其余字段取当前插值，避免被改掉） */
+function kfWrite(seg, field, value) {
+  const tt = seg.target_timerange;
+  const t = Math.max(0, Math.min(tt.duration, Math.round(state.playhead - tt.start)));
+  const v = kfValueAt(seg, t);
+  seg.keyframes = (seg.keyframes || []).filter((k) => Math.abs(k.t - t) > US / 30);
+  const nv = { x: v.x, y: v.y, scale: v.scale, rotation: v.rotation, alpha: v.alpha, [field]: value };
+  seg.keyframes.push({ t, x: nv.x, y: nv.y, scale: nv.scale, rotation: nv.rotation, alpha: nv.alpha });
+  seg.keyframes.sort((a, b) => a.t - b.t);
+}
+/** 播放头处记录一个关键帧（值取当前插值结果，便于"定点微调"） */
+function keyframeHere() {
+  const sel = selList();
+  if (sel.length !== 1) return setStatus("关键帧需要先单选一个片段");
+  const { seg } = sel[0];
+  const tt = seg.target_timerange;
+  if (state.playhead < tt.start || state.playhead > tt.start + tt.duration) return setStatus("播放头不在这个片段内");
+  snapshot();
+  kfWrite(seg, "x", kfValueAt(seg, Math.round(state.playhead - tt.start)).x);
+  renderAll();
+  setStatus(`已在 ${((state.playhead - tt.start) / US).toFixed(2)}s 记录关键帧（共 ${seg.keyframes.length} 个）`);
+}
+function clearKeyframes() {
+  const sel = selList();
+  if (!sel.length) return;
+  snapshot();
+  for (const { seg } of sel) delete seg.keyframes;
+  renderAll();
+  setStatus("已清除关键帧");
 }
 
 /* ============ 属性面板 ============ */
@@ -339,11 +630,32 @@ function renderProps() {
     html += `<div class="row"><label>颜色</label><input type="text" data-k="color" value="${mat.color || "#FFFFFF"}"></div>`;
   }
   if (hit.track.type !== "audio") {
-    html += R("缩放", "scale", clip.scale.x, 0.1, 3, 0.01, null, (v) => Math.round(v * 100) + "%");
-    html += R("位置 X", "tx", clip.transform.x, -1600, 1600, 1, null, (v) => v);
-    html += R("位置 Y", "ty", clip.transform.y, -900, 900, 1, null, (v) => v);
-    html += R("旋转", "rot", clip.rotation || 0, -180, 180, 1, null, (v) => v + "°");
-    html += R("不透明度", "alpha", clip.alpha, 0, 1, 0.01, null, (v) => Math.round(v * 100) + "%");
+    const kfOn = Array.isArray(seg.keyframes) && seg.keyframes.length > 0;
+    const cur = kfValueAt(seg, state.playhead - seg.target_timerange.start);   // 开了关键帧就显示播放头处的插值
+    html += R("缩放", "scale", kfOn ? cur.scale : clip.scale.x, 0.1, 3, 0.01, null, (v) => Math.round(v * 100) + "%");
+    html += R("位置 X", "tx", kfOn ? cur.x : clip.transform.x, -1600, 1600, 1, null, (v) => v);
+    html += R("位置 Y", "ty", kfOn ? cur.y : clip.transform.y, -900, 900, 1, null, (v) => v);
+    html += R("旋转", "rot", kfOn ? cur.rotation : (clip.rotation || 0), -180, 180, 1, null, (v) => v + "°");
+    html += R("不透明度", "alpha", kfOn ? cur.alpha : clip.alpha, 0, 1, 0.01, null, (v) => Math.round(v * 100) + "%");
+    const fade = (seg.fade = seg.fade || { in: 0, out: 0 });
+    html += `<div class="row"><label>淡入(秒)</label><input type="number" data-k="fadeIn" min="0" step="0.1" value="${((fade.in || 0) / US).toFixed(2)}"><span class="val">≤ 片段时长</span></div>`;
+    html += `<div class="row"><label>淡出(秒)</label><input type="number" data-k="fadeOut" min="0" step="0.1" value="${((fade.out || 0) / US).toFixed(2)}"><span class="val">≤ 片段时长</span></div>`;
+    html += `<div class="row"><label>关键帧</label>
+      <button class="btn small" data-act="kfAdd" title="在播放头处记录当前位置/缩放">◆ 记录</button>
+      <button class="btn small" data-act="kfDel" title="清除该片段的全部关键帧">✕ 清除</button>
+      <span class="val">${kfOn ? seg.keyframes.length + " 个" : "无"}</span></div>`;
+    if (kfOn) {
+      html += `<div class="kflist">` + seg.keyframes.map((k, i) =>
+        `<div class="kfrow"><span class="kt">${(k.t / US).toFixed(2)}s</span>` +
+        `<span class="kv">x=${Math.round(k.x)} y=${Math.round(k.y)} ${Math.round(k.scale * 100)}%</span>` +
+        `<button class="del" data-kf="${i}" title="删掉这个关键帧">✕</button></div>`).join("") + `</div>`;
+    }
+  }
+  const hasAud = !!(mat && (mat._kind === "audios" || (mat._kind === "videos" && mat.hasAudio !== false)));
+  if (hasAud) {
+    const af = (seg.fade = seg.fade || { in: 0, out: 0 });
+    html += `<div class="row"><label>音频淡入(秒)</label><input type="number" data-k="afadeIn" min="0" step="0.1" value="${((af.ain || 0) / US).toFixed(2)}"><span class="val">实听</span></div>`;
+    html += `<div class="row"><label>音频淡出(秒)</label><input type="number" data-k="afadeOut" min="0" step="0.1" value="${((af.aout || 0) / US).toFixed(2)}"><span class="val">实听</span></div>`;
   }
   html += R("速度", "speed", seg.speed || 1, 0.25, 4, 0.05, null, (v) => v.toFixed(2) + "x");
   if (mat && mat._kind !== "images") html += R("音量", "volume", seg.volume ?? 1, 0, 2, 0.01, null, (v) => Math.round(v * 100) + "%");
@@ -355,11 +667,36 @@ function renderProps() {
       const k = inp.dataset.k, v = parseFloat(inp.value);
       if (k === "content" || k === "color") { mat[k] = inp.value; }
       else if (k === "size") mat.size = v;
-      else if (k === "scale") { clip.scale.x = clip.scale.y = v; }
-      else if (k === "tx") clip.transform.x = v;
-      else if (k === "ty") clip.transform.y = v;
-      else if (k === "rot") clip.rotation = v;
-      else if (k === "alpha") clip.alpha = v;
+      else if (k === "scale") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "scale", v);
+        else clip.scale.x = clip.scale.y = v;
+      }
+      else if (k === "tx") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "x", v);
+        else clip.transform.x = v;
+      }
+      else if (k === "ty") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "y", v);
+        else clip.transform.y = v;
+      }
+      else if (k === "rot") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "rotation", v);
+        else clip.rotation = v;
+      }
+      else if (k === "alpha") {
+        if (Array.isArray(seg.keyframes) && seg.keyframes.length) kfWrite(seg, "alpha", v);
+        else clip.alpha = v;
+      }
+      else if (k === "fadeIn" || k === "fadeOut") {
+        const us = Math.max(0, Math.min(seg.target_timerange.duration, Math.round(v * US)));
+        seg.fade = seg.fade || { in: 0, out: 0 };
+        if (k === "fadeIn") seg.fade.in = us; else seg.fade.out = us;
+      }
+      else if (k === "afadeIn" || k === "afadeOut") {
+        const us = Math.max(0, Math.min(seg.target_timerange.duration, Math.round(v * US)));
+        seg.fade = seg.fade || { in: 0, out: 0 };
+        if (k === "afadeIn") seg.fade.ain = us; else seg.fade.aout = us;
+      }
       else if (k === "speed") {
         const sp = v, sp0 = seg.speed || 1;
         seg.speed = sp;
@@ -372,39 +709,132 @@ function renderProps() {
       drawFrame(state.playhead);
     };
   });
+  body.querySelectorAll("button[data-act]").forEach((b) => {
+    b.onclick = () => (b.dataset.act === "kfAdd" ? keyframeHere() : clearKeyframes());
+  });
+  body.querySelectorAll(".kfrow .del").forEach((b) => {
+    b.onclick = () => { snapshot(); seg.keyframes.splice(+b.dataset.kf, 1); renderAll(); };
+  });
 }
 
 /* ============ 播放器 ============ */
-const els = new Map();   // materialId -> HTMLMediaElement
-function elFor(mat) {
-  let el = els.get(mat.id);
+// 元素按【片段】而不是按素材缓存：同一素材在同一时刻被多个片段引用时，
+// 各片段各用各的元素，源时间 / 变速 / 音量 / 静音互不干扰。
+const els = new Map();   // segId -> HTMLMediaElement
+function elForSeg(seg, mat) {
+  if (!mat || !mat.path) return null;
+  const want = "file:///" + encodeURI(String(mat.path).replace(/\\/g, "/"));
+  let el = els.get(seg.id);
   if (!el) {
     el = document.createElement(mat._kind === "audios" ? "audio" : "video");
-    el.src = "file:///" + encodeURI(String(mat.path).replace(/\\/g, "/"));
     el.preload = "auto";
     el.crossOrigin = "anonymous";
     el.style.display = "none";
+    // seek 完成后重画：暂停状态下拖播放头，画面才会跟着走
+    el.onseeked = () => { if (!state.playing) drawFrame(state.playhead); };
     document.body.appendChild(el);
-    els.set(mat.id, el);
+    els.set(seg.id, el);
+  }
+  if (el.dataset.src !== want) { el.dataset.src = want; el.src = want; }
+  return el;
+}
+/** 丢掉时间轴上已不存在的片段元素（撤销/重做/打开工程/删除之后） */
+function pruneEls() {
+  const live = new Set();
+  for (const t of state.project.tracks) for (const s of t.segments) live.add(s.id);
+  for (const [k, el] of els) {
+    if (live.has(k)) continue;
+    try { el.pause(); el.removeAttribute("src"); el.load(); } catch (_) {}
+    el.remove();
+    els.delete(k);
+  }
+}
+/* 音频淡变：把元素接进 WebAudio，用 gain 做音量与淡变包络。
+   注意：元素一旦 createMediaElementSource，声音就只走这条图（默认直连会被切断），
+   所以 gain 同时承担音量；AudioContext 不可用时回落到元素 volume（画面淡变不受影响）。 */
+let AC = null;
+function audioGain(el) {
+  if (el._gain === undefined) {
+    el._gain = null;
+    if (typeof AudioContext !== "undefined") {
+      try {
+        AC = AC || new AudioContext();
+        const src = AC.createMediaElementSource(el);
+        const g = AC.createGain();
+        src.connect(g); g.connect(AC.destination);
+        el._gain = g;
+      } catch (e) {
+        el._gain = null;
+        window.__audioErr = String((e && e.message) || e);   // 记录下来，供冒烟测试显示真实原因
+      }
+    }
+  }
+  return el._gain;
+}
+/** 音频淡变系数（与导出侧 afade 同一语义：线性 ramp，基于片段自身时间轴） */
+function aFadeFactor(seg, tUs) {
+  const af = seg.fade || {};
+  const tt = seg.target_timerange;
+  const rel = tUs - tt.start;
+  let a = 1;
+  if (af.ain > 0) a = Math.min(a, Math.max(0, Math.min(1, rel / af.ain)));
+  if (af.aout > 0) a = Math.min(a, Math.max(0, Math.min(1, (tt.duration - rel) / af.aout)));
+  return a;
+}
+function syncEl(seg, track) {
+  const mat = materialOf(seg.material_id);
+  if (!mat) return null;
+  const el = elForSeg(seg, mat);
+  if (!el) return null;
+  el.playbackRate = Math.min(4, Math.max(0.25, seg.speed || 1));
+  const muted = (track && track.muted === true) || seg.volume === 0;
+  el.muted = muted;
+  const vol = muted ? 0 : Math.min(1, seg.volume ?? 1);
+  const g = audioGain(el);
+  if (g) {
+    // 每帧写一次 gain：淡变包络跟着播放头走，不必预排事件
+    g.gain.value = vol * aFadeFactor(seg, state.playhead);
+    if (el.volume !== 1) el.volume = 1;
+  } else if (el.volume !== undefined) {
+    el.volume = vol;
   }
   return el;
 }
-function syncEl(seg) {
-  const mat = materialOf(seg.material_id);
-  if (!mat) return;
-  const el = elFor(mat);
-  el.playbackRate = Math.min(4, Math.max(0.25, seg.speed || 1));
-  if (el.volume !== undefined) el.volume = Math.min(1, seg.volume ?? 1);
-}
+/** 轨道被隐藏：不出画面也不出声 */
+const trackHidden = (t) => !!t && t.visible === false;
 function activeSegments(tUs) {
   const out = [];
   for (const track of trackOrder()) {
+    if (trackHidden(track)) continue;
     for (const s of track.segments) {
       const { start, duration } = s.target_timerange;
       if (tUs >= start && tUs < start + duration) out.push({ track, seg: s, mat: materialOf(s.material_id) });
     }
   }
   return out;
+}
+/** 淡入淡出对 alpha 的系数（与导出侧 fade 滤镜同一语义：线性 ramp） */
+function fadeFactor(seg, tUs) {
+  const f = seg.fade || {};
+  const { start, duration } = seg.target_timerange;
+  const rel = tUs - start;
+  let a = 1;
+  if (f.in > 0) a = Math.min(a, Math.max(0, Math.min(1, rel / f.in)));
+  if (f.out > 0) a = Math.min(a, Math.max(0, Math.min(1, (duration - rel) / f.out)));
+  return a;
+}
+/** 把各活动片段的元素 seek 到对应源时间（暂停时拖播放头画面才会跟着走） */
+function seekEls(tUs) {
+  const act = activeSegments(tUs);
+  const live = new Set(act.map((a) => a.seg.id));
+  for (const { track, seg } of act) {
+    const el = syncEl(seg, track);
+    if (!el) continue;
+    const want = Math.max(0, srcTimeUs(seg, tUs) / US);
+    if (Math.abs(el.currentTime - want) > 0.04) el.currentTime = want;
+    if (!state.playing && !el.paused) el.pause();
+  }
+  for (const [k, el] of els) if (!live.has(k) && !el.paused) el.pause();
 }
 function srcTimeUs(seg, tUs) {
   const dt = tUs - seg.target_timerange.start;
@@ -421,14 +851,17 @@ function drawFrame(tUs) {
   const act = activeSegments(tUs);
   for (const { track, seg, mat } of act) {
     if (!isVisual(mat)) continue;
-    const el = elFor(mat);
+    const el = syncEl(seg, track);
+    if (!el) continue;
     const clip = seg.clip || {};
-    const scale = clip.scale || { x: 1, y: 1 };
-    const tf = clip.transform || { x: 0, y: 0 };
+    const kf = kfValueAt(seg, tUs - seg.target_timerange.start);   // 关键帧优先，无关键帧=静态值
+    const slide = slideOffsetAt(seg, tUs);                         // 滑动类转场的位移
+    const scale = { x: kf.scale, y: kf.scale };
+    const tf = { x: kf.x + slide.x, y: kf.y + slide.y };
     ctx.save();
-    ctx.globalAlpha = clip.alpha ?? 1;
+    ctx.globalAlpha = Math.max(0, Math.min(1, kf.alpha)) * fadeFactor(seg, tUs);
     ctx.translate(W / 2 + (tf.x || 0), H / 2 + (tf.y || 0));
-    if (clip.rotation) ctx.rotate((clip.rotation * Math.PI) / 180);
+    if (kf.rotation) ctx.rotate((kf.rotation * Math.PI) / 180);
     const vw = el.videoWidth || mat.width || W, vh = el.videoHeight || mat.height || H;
     const k = Math.min((W * scale.x) / vw, (H * scale.y) / vh);
     const dw = vw * k, dh = vh * k;
@@ -438,14 +871,15 @@ function drawFrame(tUs) {
   // 文字层
   for (const { track, seg, mat } of act) {
     if (!mat || mat._kind !== "texts") continue;
-    const clip = seg.clip || {}, tf = clip.transform || { x: 0, y: 0 };
+    const kf = kfValueAt(seg, tUs - seg.target_timerange.start);
+    const slide = slideOffsetAt(seg, tUs);
     ctx.save();
-    ctx.globalAlpha = clip.alpha ?? 1;
-    ctx.font = `600 ${((mat.size || 72) * (clip.scale?.x || 1)) | 0}px "Microsoft YaHei", sans-serif`;
+    ctx.globalAlpha = Math.max(0, Math.min(1, kf.alpha)) * fadeFactor(seg, tUs);
+    ctx.font = `600 ${((mat.size || 72) * kf.scale) | 0}px "Microsoft YaHei", sans-serif`;
     ctx.fillStyle = mat.color || "#FFFFFF";
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 8;
-    ctx.fillText(mat.content || "", W / 2 + (tf.x || 0), H / 2 + (tf.y || 0));
+    ctx.fillText(mat.content || "", W / 2 + kf.x + slide.x, H / 2 + kf.y + slide.y);
     ctx.restore();
   }
   $("#timeLabel").textContent = `${usToStr(tUs)} / ${usToStr(projectDuration())}`;
@@ -458,27 +892,31 @@ function drawFrame(tUs) {
 let rafId = null, anchorWall = 0, anchorUs = 0;
 function play() {
   if (state.playing) return;
+  if (AC && AC.state === "suspended") AC.resume().catch(() => {});   // 首次播放时唤醒音频上下文
   const total = projectDuration();
   if (state.playhead >= total) state.playhead = 0;
   state.playing = true; $("#btnPlay").textContent = "⏸";
   anchorWall = performance.now(); anchorUs = state.playhead;
-  for (const { seg, mat } of activeSegments(state.playhead)) { if (mat) { syncEl(seg); elFor(mat).play().catch(() => {}); } }
+  for (const { track, seg } of activeSegments(state.playhead)) {
+    const el = syncEl(seg, track);
+    if (el) el.play().catch(() => {});
+  }
   const loop = () => {
     if (!state.playing) return;
     const t = anchorUs + (performance.now() - anchorWall) * 1000;
     if (t >= total) { state.playhead = total; pause(); drawFrame(state.playhead); return; }
     state.playhead = t;
     const act = activeSegments(t);
-    const live = new Set(act.map((a) => a.mat && a.mat.id));
-    for (const [id, el] of els) {
-      const a = act.find((x) => x.mat && x.mat.id === id);
-      if (a) {
-        const want = srcTimeUs(a.seg, t) / US;
-        if (Math.abs(el.currentTime - want) > 0.28) el.currentTime = want;
-        syncEl(a.seg);
-        if (el.paused) el.play().catch(() => {});
-      } else if (!el.paused) el.pause();
+    const live = new Set();
+    for (const { track, seg } of act) {
+      const el = syncEl(seg, track);
+      if (!el) continue;
+      live.add(seg.id);
+      const want = srcTimeUs(seg, t) / US;
+      if (Math.abs(el.currentTime - want) > 0.28) el.currentTime = want;
+      if (el.paused) el.play().catch(() => {});
     }
+    for (const [k, el] of els) if (!live.has(k) && !el.paused) el.pause();
     drawFrame(t);
     positionPlayhead();
     rafId = requestAnimationFrame(loop);
@@ -493,19 +931,23 @@ function pause() {
 }
 function setPlayhead(us) {
   state.playhead = Math.max(0, Math.min(us, projectDuration()));
+  seekEls(state.playhead);      // 暂停状态下也要让画面跟到该时刻
   drawFrame(state.playhead); positionPlayhead();
 }
 function positionPlayhead() {
-  $("#playhead").style.left = (px(state.playhead) + 96) + "px";
+  $("#playhead").style.left = (px(state.playhead) + 124) + "px";
   $("#playhead").style.height = ($("#tracks").scrollHeight || 0) + "px";
 }
 
 /* ============ 顶层渲染 ============ */
 function renderAll() {
+  pruneEls();
   renderTimeline(); renderProps(); renderMedia(); drawFrame(state.playhead); renderCueList();
   $("#projName").value = state.project.name || "未命名工程";
   $("#btnUndo").disabled = !state.undo.length;
   $("#btnRedo").disabled = !state.redo.length;
+  $("#btnSnap").classList.toggle("toggle-on", state.snap !== false);
+  $("#btnRipple").classList.toggle("toggle-on", state.ripple === true);
 }
 function setStatus(s) { $("#status").textContent = s; }
 
@@ -544,6 +986,25 @@ $("#btnExport").onclick = exportVideo;
 $("#btnPlay").onclick = () => (state.playing ? pause() : play());
 $("#btnSplit").onclick = splitAtPlayhead;
 $("#btnDelete").onclick = deleteSel;
+$("#btnRippleDel").onclick = rippleDeleteSel;
+$("#btnSnap").onclick = () => {
+  state.snap = state.snap === false;
+  renderAll();
+  setStatus(state.snap === false ? "磁吸已关闭" : "磁吸已开启（跨轨吸附片段边缘与播放头）");
+};
+$("#btnRipple").onclick = () => {
+  state.ripple = !state.ripple;
+  renderAll();
+  setStatus(state.ripple ? "波纹插入已开启：拖入素材会把该时刻之后的片段右移" : "波纹插入已关闭");
+};
+$("#btnTransition").onclick = () => {
+  const dur = (parseFloat($("#trDur").value) || 0.5) * US;
+  addTransition(dur, $("#trType").value);
+};
+$("#btnUnTransition").onclick = () => removeTransition();
+$("#btnKf").onclick = keyframeHere;
+$("#btnGroup").onclick = groupSelected;
+$("#btnUngroup").onclick = ungroupSelected;
 $("#btnUndo").onclick = undo;
 $("#btnRedo").onclick = redo;
 $("#btnAddVideoTrack").onclick = () => { snapshot(); state.project.tracks.push({ id: nextId("tk"), type: "video", name: "画中画", segments: [] }); renderAll(); };
@@ -571,7 +1032,7 @@ window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
   if (e.code === "Space") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (e.key === "s" || e.key === "S") splitAtPlayhead();
-  else if (e.key === "Delete" || e.key === "Backspace") deleteSel();
+  else if (e.key === "Delete" || e.key === "Backspace") { e.shiftKey ? rippleDeleteSel() : deleteSel(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveProject(); }

@@ -13,6 +13,9 @@ out.mp4
 *.srt.tmp
 *.part
 
+# 打包产物（npm run dist 的输出，不入库）
+dist/
+
 # 系统垃圾
 Thumbs.db
 desktop.ini
